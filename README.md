@@ -113,6 +113,22 @@ streamlit run app.py
   - `APP_BOOTSTRAP_ADMIN_EMAIL`
   - `APP_BOOTSTRAP_ADMIN_PASSWORD`
 
+## Tests & CI/CD
+- Automatisierte Tests liegen unter `/tests` und laufen mit `pytest`.
+- CI läuft über GitHub Actions in `.github/workflows/ci.yml` bei jedem Push auf `main` und bei Pull Requests.
+
+### Die 10 wichtigsten Testfälle
+1. Passwort-Hashing und Verifikation funktionieren korrekt.
+2. Datenbank-Bootstrap erzeugt genau einen initialen Admin.
+3. Benutzer kann angelegt und authentifiziert werden.
+4. Doppelte E-Mail beim Anlegen wird blockiert.
+5. Deaktivierter Benutzer kann sich nicht einloggen.
+6. Admin-Benutzer kann nicht deaktiviert werden.
+7. Passwortänderung macht altes Passwort ungültig und neues gültig.
+8. Vergleich identischer Bilder erzeugt keine Defektregionen.
+9. Vergleich veränderter Bilder erkennt Defektregionen.
+10. Interaktionsspeicherung persistiert korrekt und Übersicht mappt das ausgewählte Bild korrekt.
+
 ## Größen- und Seitenverhältnis-Strategie
 - Die App verwendet das Referenzbild als geometrische Basis.
 - Wenn Größen unterschiedlich sind, wird das Testbild auf die Referenzgröße **resized**.
