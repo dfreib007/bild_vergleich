@@ -1,6 +1,7 @@
 # SSIM Image Compare App (Streamlit)
 
 Kleine POC-App zum Vergleich von zwei Bildern mit **OpenCV** und **SSIM** (scikit-image).
+Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 
 ## Features
 - Modusauswahl: **Single Vergleich**, **Batch Modus** oder **Interaktion Modus**
