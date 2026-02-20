@@ -665,6 +665,18 @@ def render_header() -> bool:
             margin: 0;
             padding: 0;
         }
+        .app-header-left {
+            display: flex;
+            align-items: center;
+            gap: 0.9rem;
+            min-height: 84px;
+        }
+        .app-header-title-wrap {
+            display: flex;
+            align-items: baseline;
+            gap: 0.7rem;
+            flex-wrap: wrap;
+        }
         .app-header-user {
             font-size: 0.95rem;
             margin-top: 0.35rem;
@@ -675,7 +687,8 @@ def render_header() -> bool:
         .app-header-build {
             font-size: 0.75rem;
             opacity: 0.8;
-            margin-top: 0.2rem;
+            white-space: nowrap;
+            margin-top: 0.4rem;
         }
         </style>
         """,
@@ -683,13 +696,24 @@ def render_header() -> bool:
     )
 
     logo_path = find_logo_path()
-    col_logo, col_title, col_admin, col_user, col_logout = st.columns([1, 6, 1.2, 2, 1], vertical_alignment="center")
-    with col_logo:
-        if logo_path is not None:
-            st.image(str(logo_path), use_container_width=True)
-        st.markdown(f"<div class='app-header-build'>{get_build_label()}</div>", unsafe_allow_html=True)
-    with col_title:
-        st.markdown("<div class='app-header-title'>Bildvergleich</div>", unsafe_allow_html=True)
+    col_left, col_admin, col_user, col_logout = st.columns([7, 1.2, 2, 1], vertical_alignment="center")
+    with col_left:
+        logo_col, title_col = st.columns([1.2, 5.8], vertical_alignment="center")
+        with logo_col:
+            if logo_path is not None:
+                st.image(str(logo_path), use_container_width=True)
+        with title_col:
+            st.markdown(
+                f"""
+                <div class="app-header-left">
+                  <div class="app-header-title-wrap">
+                    <div class="app-header-title">Bildvergleich</div>
+                    <div class="app-header-build">{get_build_label()}</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     with col_admin:
         admin_clicked = st.button("Admin", disabled=not is_admin, use_container_width=True)
     with col_user:
