@@ -3,6 +3,7 @@
 Kleine POC-App zum Vergleich von zwei Bildern mit **OpenCV** und **SSIM** (scikit-image).
 
 ## Features
+- Modusauswahl: **Single Vergleich** oder **Batch Modus**
 - Upload von Referenzbild (Golden) und Testbild (PNG/JPG)
 - Optionales Alignment per ECC (`cv2.findTransformECC`) oder ORB + Homography
 - SSIM-Score (0..1)
@@ -10,6 +11,7 @@ Kleine POC-App zum Vergleich von zwei Bildern mit **OpenCV** und **SSIM** (sciki
 - Filterung kleiner Artefakte über Mindestfläche
 - Optionale Bounding Boxes und Heatmap-Overlay
 - Download von Overlay/Mask/Diff als PNG, Kennzahlen als CSV und Vergleichsreport als PDF
+- Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
 
 ## Voraussetzungen
 - Python **3.9+**
@@ -26,6 +28,16 @@ pip install -r requirements.txt
 ```bash
 streamlit run app.py
 ```
+
+## Modi
+- **Single Vergleich**:
+  - Bestehender Upload-Workflow für ein Referenz- und ein Testbild inkl. Visuals und Downloads.
+- **Batch Modus**:
+  - Zwei lokale Ordnerpfade angeben (Referenz/Test).
+  - Optional rekursive Suche in Unterordnern.
+  - Dateien werden über identischen Dateinamen (nicht rekursiv) bzw. identischen relativen Pfad (rekursiv) gepaart.
+  - Alle Paare werden nacheinander verglichen; Ergebnisliste + Batch-CSV stehen bereit.
+  - Zusätzliche Vorschau für ein ausgewähltes Paar.
 
 ## Parameter erklärt
 - **Bilder automatisch ausrichten (Alignment)**:
@@ -52,6 +64,9 @@ streamlit run app.py
 - **Downloads**:
   - Exportiert `overlay.png`, `mask.png`, `ssim_diff.png`, `metrics.csv` und `vergleich_report.pdf`.
   - Der PDF-Report enthält Kennzahlen und eine kompakte Vergleichsübersicht (Referenz, Test, Diff, Maske, Overlay).
+
+- **Batch CSV**:
+  - Enthält pro Bildpaar Pfade, Status, SSIM, Regionsanzahl, Abweichungsfläche und Alignment-Status.
 
 ## Größen- und Seitenverhältnis-Strategie
 - Die App verwendet das Referenzbild als geometrische Basis.

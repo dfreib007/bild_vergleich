@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -12,6 +13,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
 @dataclass
@@ -29,12 +32,17 @@ def load_image(file: Any) -> np.ndarray:
     return image
 
 
+def load_image_from_path(path: Path) -> np.ndarray:
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Bild konnte nicht geladen werden: {path}")
+    return image
+
+
 def align_images_ecc(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, str]:
-    """Align test image to reference using ECC affine transform."""
     ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
     test_gray = cv2.cvtColor(test, cv2.COLOR_BGR2GRAY)
 
-    warp_mode = cv2.MOTION_AFFINE
     warp_matrix = np.eye(2, 3, dtype=np.float32)
     criteria = (
         cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
@@ -47,7 +55,7 @@ def align_images_ecc(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.
             ref_gray,
             test_gray,
             warp_matrix,
-            warp_mode,
+            cv2.MOTION_AFFINE,
             criteria,
         )
         aligned = cv2.warpAffine(
@@ -63,7 +71,6 @@ def align_images_ecc(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.
 
 
 def align_images_orb(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, str]:
-    """Align test image to reference using ORB keypoints + homography."""
     ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
     test_gray = cv2.cvtColor(test, cv2.COLOR_BGR2GRAY)
 
@@ -74,14 +81,12 @@ def align_images_orb(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.
     if des_ref is None or des_test is None:
         return test, None, "Alignment fehlgeschlagen: keine ORB-Features gefunden. Fallback ohne Alignment."
 
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = matcher.match(des_test, des_ref)
+    matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(des_test, des_ref)
     if len(matches) < 4:
         return test, None, "Alignment fehlgeschlagen: zu wenige Matches. Fallback ohne Alignment."
 
     matches = sorted(matches, key=lambda m: m.distance)
-    keep_n = max(4, int(len(matches) * 0.6))
-    good_matches = matches[:keep_n]
+    good_matches = matches[: max(4, int(len(matches) * 0.6))]
 
     test_pts = np.float32([kp_test[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     ref_pts = np.float32([kp_ref[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
@@ -101,9 +106,7 @@ def align_images_orb(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.
     return aligned, homography, f"Alignment erfolgreich (ORB, Inliers={inliers}/{len(good_matches)})."
 
 
-def align_images(
-    ref: np.ndarray, test: np.ndarray, method: str
-) -> tuple[np.ndarray, np.ndarray | None, str]:
+def align_images(ref: np.ndarray, test: np.ndarray, method: str) -> tuple[np.ndarray, np.ndarray | None, str]:
     if method == "ORB (Homography)":
         return align_images_orb(ref, test)
     return align_images_ecc(ref, test)
@@ -111,8 +114,7 @@ def align_images(
 
 def compute_ssim_diff(ref_gray: np.ndarray, test_gray: np.ndarray) -> tuple[float, np.ndarray]:
     score, diff = structural_similarity(ref_gray, test_gray, full=True)
-    diff_uint8 = (diff * 255).astype(np.uint8)
-    return float(score), diff_uint8
+    return float(score), (diff * 255).astype(np.uint8)
 
 
 def find_regions(mask: np.ndarray, min_area: int) -> tuple[list[np.ndarray], RegionStats]:
@@ -126,8 +128,8 @@ def make_overlay(
     test_bgr: np.ndarray,
     mask: np.ndarray,
     contours: list[np.ndarray],
-    show_boxes: bool = True,
-    show_heatmap: bool = True,
+    show_boxes: bool,
+    show_heatmap: bool,
 ) -> np.ndarray:
     overlay = test_bgr.copy()
 
@@ -144,6 +146,69 @@ def make_overlay(
     return overlay
 
 
+def run_comparison(
+    ref_bgr: np.ndarray,
+    test_bgr: np.ndarray,
+    threshold_value: int,
+    min_area: int,
+    align_enabled: bool,
+    alignment_method: str,
+    show_boxes: bool,
+    show_heatmap: bool,
+) -> dict[str, Any]:
+    ref_h, ref_w = ref_bgr.shape[:2]
+    test_h, test_w = test_bgr.shape[:2]
+
+    aspect_ratio_mismatch = not np.isclose(ref_w / ref_h, test_w / test_h)
+    if (ref_h, ref_w) != (test_h, test_w):
+        test_bgr = cv2.resize(test_bgr, (ref_w, ref_h), interpolation=cv2.INTER_AREA)
+
+    status_msg = "Alignment deaktiviert."
+    if align_enabled:
+        test_bgr, _, status_msg = align_images(ref_bgr, test_bgr, method=alignment_method)
+
+    ref_gray = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2GRAY)
+    test_gray = cv2.cvtColor(test_bgr, cv2.COLOR_BGR2GRAY)
+
+    score, diff_gray = compute_ssim_diff(ref_gray, test_gray)
+    diff_inverted = cv2.bitwise_not(diff_gray)
+
+    _, mask = cv2.threshold(diff_inverted, threshold_value, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    contours, region_stats = find_regions(mask, min_area=min_area)
+
+    filtered_mask = np.zeros_like(mask)
+    if contours:
+        cv2.drawContours(filtered_mask, contours, contourIdx=-1, color=255, thickness=cv2.FILLED)
+
+    overlay = make_overlay(
+        test_bgr=test_bgr,
+        mask=filtered_mask,
+        contours=contours,
+        show_boxes=show_boxes,
+        show_heatmap=show_heatmap,
+    )
+
+    image_area = ref_h * ref_w
+    area_percent = (region_stats.total_area / image_area * 100) if image_area else 0.0
+
+    return {
+        "score": score,
+        "region_stats": region_stats,
+        "area_percent": area_percent,
+        "status_msg": status_msg,
+        "aspect_ratio_mismatch": aspect_ratio_mismatch,
+        "diff_inverted": diff_inverted,
+        "filtered_mask": filtered_mask,
+        "overlay": overlay,
+        "ref_bgr": ref_bgr,
+        "test_bgr": test_bgr,
+    }
+
+
 def to_rgb(image_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
@@ -155,7 +220,7 @@ def encode_png_bytes(image: np.ndarray) -> bytes:
     return buf.tobytes()
 
 
-def make_csv_bytes(
+def make_single_csv_bytes(
     score: float,
     region_count: int,
     total_area_px: int,
@@ -194,6 +259,19 @@ def make_csv_bytes(
     return output.getvalue().encode("utf-8")
 
 
+def make_batch_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
+    output = io.StringIO()
+    if not rows:
+        return output.getvalue().encode("utf-8")
+
+    fields = list(rows[0].keys())
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue().encode("utf-8")
+
+
 def make_pdf_report_bytes(
     ref_bgr: np.ndarray,
     test_bgr: np.ndarray,
@@ -211,12 +289,9 @@ def make_pdf_report_bytes(
     status_msg: str,
 ) -> bytes:
     def to_png_reader(image: np.ndarray) -> ImageReader:
-        png = encode_png_bytes(image)
-        return ImageReader(io.BytesIO(png))
+        return ImageReader(io.BytesIO(encode_png_bytes(image)))
 
-    def draw_image_fit(
-        pdf: canvas.Canvas, img_reader: ImageReader, x: float, y: float, w: float, h: float
-    ) -> None:
+    def draw_image_fit(pdf: canvas.Canvas, img_reader: ImageReader, x: float, y: float, w: float, h: float) -> None:
         img_w, img_h = img_reader.getSize()
         scale = min(w / img_w, h / img_h)
         draw_w = img_w * scale
@@ -240,11 +315,7 @@ def make_pdf_report_bytes(
         f"Abweichungsregionen: {region_count}",
         f"Gesamt-Abweichungsflaeche: {total_area_px} px ({area_percent:.2f}%)",
         f"Threshold: {threshold}, Min. Defektflaeche: {min_area} px",
-        (
-            f"Alignment: {alignment_method} ({status_msg})"
-            if alignment_enabled
-            else "Alignment: deaktiviert"
-        ),
+        f"Alignment: {alignment_method} ({status_msg})" if alignment_enabled else "Alignment: deaktiviert",
     ]
     for line in info_lines:
         pdf.drawString(margin, y_info, line)
@@ -277,32 +348,82 @@ def make_pdf_report_bytes(
     return buf.getvalue()
 
 
-def main() -> None:
-    st.set_page_config(page_title="SSIM Bildvergleich", layout="wide")
-    st.title("SSIM Bildvergleich (OpenCV + scikit-image)")
+def collect_images(folder: Path, recursive: bool) -> dict[str, Path]:
+    if recursive:
+        candidates = folder.rglob("*")
+    else:
+        candidates = folder.glob("*")
 
-    st.markdown(
-        "Vergleicht ein Golden Image mit einem Testbild und visualisiert Abweichungen als Maske/Overlay."
-    )
+    files: dict[str, Path] = {}
+    for path in candidates:
+        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        key = path.relative_to(folder).as_posix().lower() if recursive else path.name.lower()
+        if key not in files:
+            files[key] = path
+    return files
 
-    col_left, col_right = st.columns(2)
-    with col_left:
-        ref_file = st.file_uploader("Referenzbild (Golden)", type=["png", "jpg", "jpeg"], key="ref")
-    with col_right:
-        test_file = st.file_uploader("Testbild", type=["png", "jpg", "jpeg"], key="test")
 
-    align_enabled = st.checkbox("Bilder automatisch ausrichten (Alignment)", value=True)
+def find_logo_path() -> Path | None:
+    candidates = [
+        Path("evolit-logo.png"),
+        Path("evolit_logo.png"),
+        Path("logo.png"),
+        Path("assets/evolit-logo.png"),
+        Path("assets/evolit_logo.png"),
+        Path("assets/logo.png"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def render_header() -> None:
+    logo_path = find_logo_path()
+    col_logo, col_title = st.columns([1, 6], vertical_alignment="center")
+    with col_logo:
+        if logo_path is not None:
+            st.image(str(logo_path), use_container_width=True)
+    with col_title:
+        st.title("Bildvergleich")
+        st.markdown(
+            "Vergleicht ein Golden Image mit einem Testbild und visualisiert Abweichungen als Maske/Overlay."
+        )
+
+
+def render_common_controls(key_prefix: str) -> tuple[bool, str, int, int, bool, bool]:
+    align_enabled = st.checkbox("Bilder automatisch ausrichten (Alignment)", value=True, key=f"align_{key_prefix}")
     alignment_method = "ECC (Affine)"
     if align_enabled:
         alignment_method = st.selectbox(
             "Alignment-Methode",
             options=["ECC (Affine)", "ORB (Homography)"],
             index=0,
+            key=f"align_method_{key_prefix}",
         )
-    threshold_value = st.slider("Abweichungsschwelle", min_value=0, max_value=255, value=45)
-    min_area = st.slider("Min. Defektfläche (px)", min_value=0, max_value=20000, value=120, step=10)
-    show_boxes = st.checkbox("Bounding Boxes anzeigen", value=True)
-    show_heatmap = st.checkbox("Heatmap Overlay anzeigen", value=True)
+
+    threshold_value = st.slider(
+        "Abweichungsschwelle", min_value=0, max_value=255, value=45, key=f"threshold_{key_prefix}"
+    )
+    min_area = st.slider(
+        "Min. Defektfläche (px)", min_value=0, max_value=20000, value=120, step=10, key=f"min_area_{key_prefix}"
+    )
+    show_boxes = st.checkbox("Bounding Boxes anzeigen", value=True, key=f"boxes_{key_prefix}")
+    show_heatmap = st.checkbox("Heatmap Overlay anzeigen", value=True, key=f"heatmap_{key_prefix}")
+
+    return align_enabled, alignment_method, threshold_value, min_area, show_boxes, show_heatmap
+
+
+def render_single_mode() -> None:
+    st.subheader("Single Vergleich")
+    col_left, col_right = st.columns(2)
+    with col_left:
+        ref_file = st.file_uploader("Referenzbild (Golden)", type=["png", "jpg", "jpeg"], key="ref_single")
+    with col_right:
+        test_file = st.file_uploader("Testbild", type=["png", "jpg", "jpeg"], key="test_single")
+
+    align_enabled, alignment_method, threshold_value, min_area, show_boxes, show_heatmap = render_common_controls("single")
 
     if not ref_file or not test_file:
         st.info("Bitte beide Bilder hochladen, um den Vergleich zu starten.")
@@ -315,55 +436,32 @@ def main() -> None:
         st.error(str(err))
         return
 
-    ref_h, ref_w = ref_bgr.shape[:2]
-    test_h, test_w = test_bgr.shape[:2]
+    result = run_comparison(
+        ref_bgr=ref_bgr,
+        test_bgr=test_bgr,
+        threshold_value=threshold_value,
+        min_area=min_area,
+        align_enabled=align_enabled,
+        alignment_method=alignment_method,
+        show_boxes=show_boxes,
+        show_heatmap=show_heatmap,
+    )
 
-    if (ref_w / ref_h) != (test_w / test_h):
+    if result["aspect_ratio_mismatch"]:
         st.warning(
             "Unterschiedliches Seitenverhältnis erkannt. Das Testbild wird auf die Referenzgröße skaliert; "
             "dadurch kann es zu geometrischen Verzerrungen kommen."
         )
 
-    if (ref_h, ref_w) != (test_h, test_w):
-        test_bgr = cv2.resize(test_bgr, (ref_w, ref_h), interpolation=cv2.INTER_AREA)
-
-    status_msg = "Alignment deaktiviert."
-    if align_enabled:
-        test_bgr, _, status_msg = align_images(ref_bgr, test_bgr, method=alignment_method)
-
+    status_msg = result["status_msg"]
     if "fehlgeschlagen" in status_msg.lower():
         st.warning(status_msg)
     else:
         st.info(status_msg)
 
-    ref_gray = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2GRAY)
-    test_gray = cv2.cvtColor(test_bgr, cv2.COLOR_BGR2GRAY)
-
-    score, diff_gray = compute_ssim_diff(ref_gray, test_gray)
-    diff_inverted = cv2.bitwise_not(diff_gray)
-
-    _, mask = cv2.threshold(diff_inverted, threshold_value, 255, cv2.THRESH_BINARY)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    contours, region_stats = find_regions(mask, min_area=min_area)
-
-    filtered_mask = np.zeros_like(mask)
-    if contours:
-        cv2.drawContours(filtered_mask, contours, contourIdx=-1, color=255, thickness=cv2.FILLED)
-
-    overlay = make_overlay(
-        test_bgr=test_bgr,
-        mask=filtered_mask,
-        contours=contours,
-        show_boxes=show_boxes,
-        show_heatmap=show_heatmap,
-    )
-
-    image_area = ref_h * ref_w
-    area_percent = (region_stats.total_area / image_area * 100) if image_area else 0.0
+    region_stats: RegionStats = result["region_stats"]
+    score = result["score"]
+    area_percent = result["area_percent"]
 
     m1, m2, m3 = st.columns(3)
     m1.metric("SSIM-Score", f"{score:.4f}")
@@ -373,27 +471,27 @@ def main() -> None:
     v1, v2, v3 = st.columns(3)
     with v1:
         st.subheader("Referenzbild")
-        st.image(to_rgb(ref_bgr), use_container_width=True)
+        st.image(to_rgb(result["ref_bgr"]), use_container_width=True)
     with v2:
         st.subheader("Testbild")
-        st.image(to_rgb(test_bgr), use_container_width=True)
+        st.image(to_rgb(result["test_bgr"]), use_container_width=True)
     with v3:
         st.subheader("SSIM-Diff (grau)")
-        st.image(diff_inverted, clamp=True, use_container_width=True)
+        st.image(result["diff_inverted"], clamp=True, use_container_width=True)
 
     v4, v5 = st.columns(2)
     with v4:
         st.subheader("Threshold-Maske")
-        st.image(filtered_mask, clamp=True, use_container_width=True)
+        st.image(result["filtered_mask"], clamp=True, use_container_width=True)
     with v5:
         st.subheader("Overlay")
-        st.image(to_rgb(overlay), use_container_width=True)
+        st.image(to_rgb(result["overlay"]), use_container_width=True)
 
     try:
-        overlay_png = encode_png_bytes(overlay)
-        mask_png = encode_png_bytes(filtered_mask)
-        diff_png = encode_png_bytes(diff_inverted)
-        csv_bytes = make_csv_bytes(
+        overlay_png = encode_png_bytes(result["overlay"])
+        mask_png = encode_png_bytes(result["filtered_mask"])
+        diff_png = encode_png_bytes(result["diff_inverted"])
+        csv_bytes = make_single_csv_bytes(
             score=score,
             region_count=region_stats.count,
             total_area_px=region_stats.total_area,
@@ -404,11 +502,11 @@ def main() -> None:
             alignment_method=alignment_method,
         )
         pdf_bytes = make_pdf_report_bytes(
-            ref_bgr=ref_bgr,
-            test_bgr=test_bgr,
-            diff_gray=diff_inverted,
-            mask=filtered_mask,
-            overlay_bgr=overlay,
+            ref_bgr=result["ref_bgr"],
+            test_bgr=result["test_bgr"],
+            diff_gray=result["diff_inverted"],
+            mask=result["filtered_mask"],
+            overlay_bgr=result["overlay"],
             score=score,
             region_count=region_stats.count,
             total_area_px=region_stats.total_area,
@@ -426,40 +524,182 @@ def main() -> None:
     st.subheader("Downloads")
     d1, d2, d3, d4, d5 = st.columns(5)
     with d1:
-        st.download_button(
-            label="Overlay PNG",
-            data=overlay_png,
-            file_name="overlay.png",
-            mime="image/png",
-        )
+        st.download_button("Overlay PNG", data=overlay_png, file_name="overlay.png", mime="image/png")
     with d2:
-        st.download_button(
-            label="Maske PNG",
-            data=mask_png,
-            file_name="mask.png",
-            mime="image/png",
-        )
+        st.download_button("Maske PNG", data=mask_png, file_name="mask.png", mime="image/png")
     with d3:
-        st.download_button(
-            label="Diff PNG",
-            data=diff_png,
-            file_name="ssim_diff.png",
-            mime="image/png",
-        )
+        st.download_button("Diff PNG", data=diff_png, file_name="ssim_diff.png", mime="image/png")
     with d4:
-        st.download_button(
-            label="Metriken CSV",
-            data=csv_bytes,
-            file_name="metrics.csv",
-            mime="text/csv",
-        )
+        st.download_button("Metriken CSV", data=csv_bytes, file_name="metrics.csv", mime="text/csv")
     with d5:
         st.download_button(
-            label="Report PDF",
+            "Report PDF",
             data=pdf_bytes,
             file_name="vergleich_report.pdf",
             mime="application/pdf",
         )
+
+
+def render_batch_mode() -> None:
+    st.subheader("Batch Modus")
+    st.caption("Ordnerpfade sind lokale Pfade auf dem Rechner, auf dem Streamlit läuft.")
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        ref_folder = st.text_input("Referenz-Ordner", placeholder="/path/to/golden", key="ref_folder")
+    with col_right:
+        test_folder = st.text_input("Test-Ordner", placeholder="/path/to/test", key="test_folder")
+
+    recursive = st.checkbox("Unterordner rekursiv einbeziehen", value=True, key="batch_recursive")
+    align_enabled, alignment_method, threshold_value, min_area, show_boxes, show_heatmap = render_common_controls("batch")
+
+    run_batch = st.button("Batch Vergleich starten", type="primary")
+    if not run_batch:
+        return
+
+    ref_root = Path(ref_folder).expanduser()
+    test_root = Path(test_folder).expanduser()
+
+    if not ref_root.is_dir() or not test_root.is_dir():
+        st.error("Bitte zwei gültige Ordnerpfade angeben.")
+        return
+
+    ref_files = collect_images(ref_root, recursive=recursive)
+    test_files = collect_images(test_root, recursive=recursive)
+
+    if not ref_files:
+        st.error("Im Referenz-Ordner wurden keine PNG/JPG-Dateien gefunden.")
+        return
+    if not test_files:
+        st.error("Im Test-Ordner wurden keine PNG/JPG-Dateien gefunden.")
+        return
+
+    common_keys = sorted(set(ref_files) & set(test_files))
+    only_ref = sorted(set(ref_files) - set(test_files))
+    only_test = sorted(set(test_files) - set(ref_files))
+
+    st.info(
+        f"Gefunden: Referenz={len(ref_files)}, Test={len(test_files)}, gematcht={len(common_keys)}, "
+        f"nur Referenz={len(only_ref)}, nur Test={len(only_test)}"
+    )
+
+    if not common_keys:
+        st.warning("Keine passenden Bildpaare gefunden. Nutze identische Dateinamen/relative Pfade.")
+        return
+
+    rows: list[dict[str, Any]] = []
+    progress = st.progress(0)
+
+    for idx, key in enumerate(common_keys):
+        ref_path = ref_files[key]
+        test_path = test_files[key]
+
+        row: dict[str, Any] = {
+            "pair_key": key,
+            "reference_path": str(ref_path),
+            "test_path": str(test_path),
+            "status": "ok",
+            "alignment_status": "",
+            "ssim_score": "",
+            "regions_count": "",
+            "total_area_px": "",
+            "total_area_percent": "",
+            "aspect_ratio_mismatch": "",
+        }
+
+        try:
+            ref_bgr = load_image_from_path(ref_path)
+            test_bgr = load_image_from_path(test_path)
+            result = run_comparison(
+                ref_bgr=ref_bgr,
+                test_bgr=test_bgr,
+                threshold_value=threshold_value,
+                min_area=min_area,
+                align_enabled=align_enabled,
+                alignment_method=alignment_method,
+                show_boxes=show_boxes,
+                show_heatmap=show_heatmap,
+            )
+
+            region_stats: RegionStats = result["region_stats"]
+            row["alignment_status"] = result["status_msg"]
+            row["ssim_score"] = f"{result['score']:.6f}"
+            row["regions_count"] = region_stats.count
+            row["total_area_px"] = region_stats.total_area
+            row["total_area_percent"] = f"{result['area_percent']:.6f}"
+            row["aspect_ratio_mismatch"] = result["aspect_ratio_mismatch"]
+        except ValueError as err:
+            row["status"] = f"error: {err}"
+
+        rows.append(row)
+        progress.progress((idx + 1) / len(common_keys))
+
+    success_rows = [r for r in rows if r["status"] == "ok"]
+
+    st.subheader("Batch Ergebnisse")
+    if success_rows:
+        scores = np.array([float(r["ssim_score"]) for r in success_rows], dtype=np.float64)
+        areas = np.array([float(r["total_area_px"]) for r in success_rows], dtype=np.float64)
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Verglichene Paare", str(len(rows)))
+        b2.metric("Ø SSIM", f"{scores.mean():.4f}")
+        b3.metric("Ø Abweichungsfläche (px)", f"{areas.mean():.1f}")
+    else:
+        st.warning("Alle Vergleiche sind fehlgeschlagen.")
+
+    st.dataframe(rows, use_container_width=True)
+
+    csv_bytes = make_batch_csv_bytes(rows)
+    st.download_button(
+        "Batch CSV herunterladen",
+        data=csv_bytes,
+        file_name="batch_metrics.csv",
+        mime="text/csv",
+    )
+
+    preview_candidates = [r["pair_key"] for r in success_rows]
+    if not preview_candidates:
+        return
+
+    preview_key = st.selectbox("Vorschau eines Paares", options=preview_candidates, key="batch_preview")
+    ref_bgr = load_image_from_path(ref_files[preview_key])
+    test_bgr = load_image_from_path(test_files[preview_key])
+    preview_result = run_comparison(
+        ref_bgr=ref_bgr,
+        test_bgr=test_bgr,
+        threshold_value=threshold_value,
+        min_area=min_area,
+        align_enabled=align_enabled,
+        alignment_method=alignment_method,
+        show_boxes=show_boxes,
+        show_heatmap=show_heatmap,
+    )
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.image(to_rgb(preview_result["ref_bgr"]), caption="Referenz", use_container_width=True)
+    with p2:
+        st.image(to_rgb(preview_result["test_bgr"]), caption="Test", use_container_width=True)
+    with p3:
+        st.image(preview_result["diff_inverted"], caption="SSIM-Diff", clamp=True, use_container_width=True)
+
+    p4, p5 = st.columns(2)
+    with p4:
+        st.image(preview_result["filtered_mask"], caption="Maske", clamp=True, use_container_width=True)
+    with p5:
+        st.image(to_rgb(preview_result["overlay"]), caption="Overlay", use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Bildvergleich", layout="wide")
+    render_header()
+
+    mode = st.selectbox("Modus", options=["Single Vergleich", "Batch Modus"], index=0)
+
+    if mode == "Batch Modus":
+        render_batch_mode()
+    else:
+        render_single_mode()
 
 
 if __name__ == "__main__":
