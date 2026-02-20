@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import base64
 import hashlib
 import hmac
 import io
@@ -15,11 +16,13 @@ from typing import Any
 
 import cv2
 import numpy as np
+import pandas as pd
 import streamlit as st
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 DB_PATH = Path("interaktion_results.db")
@@ -599,6 +602,11 @@ def list_interaction_overview_rows() -> list[dict[str, Any]]:
     return result
 
 
+def blob_to_data_uri(image_blob: bytes) -> str:
+    encoded = base64.b64encode(image_blob).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def collect_images(folder: Path, recursive: bool) -> dict[str, Path]:
     candidates = folder.rglob("*") if recursive else folder.glob("*")
     files: dict[str, Path] = {}
@@ -1091,111 +1099,57 @@ def render_overview_mode() -> None:
         st.info("Noch keine Einträge aus dem Interaktion Modus vorhanden.")
         return
 
-    st.markdown("**Filter**")
-    f1, f2, f3 = st.columns(3)
-    with f1:
-        id_filter = st.text_input("ID", key="ov_filter_id", placeholder="z. B. 12")
-        has_image_a = st.selectbox("Bild A", options=["Alle", "Hat Bild"], key="ov_filter_img_a")
-        has_image_b = st.selectbox("Bild B", options=["Alle", "Hat Bild"], key="ov_filter_img_b")
-    with f2:
-        has_diff = st.selectbox("Difference A to B", options=["Alle", "Hat Bild"], key="ov_filter_diff")
-        has_selected_image = st.selectbox(
-            "Ausgewähltes Bild (als Bild)", options=["Alle", "Hat Bild"], key="ov_filter_selected_img"
-        )
-        selected_letter_filter = st.selectbox(
-            "Buchstabe des ausgewählten Bildes",
-            options=["Alle", "A", "B", "?"],
-            key="ov_filter_selected_letter",
-        )
-    with f3:
-        timestamp_filter = st.text_input(
-            "Timestamp (enthält)", key="ov_filter_timestamp", placeholder="z. B. 2026-02-20"
-        )
-        use_ts_from = st.checkbox("Von-Filter aktiv", key="ov_use_ts_from")
-        ts_from = st.date_input("Timestamp von", value=date.today(), key="ov_filter_ts_from")
-        use_ts_to = st.checkbox("Bis-Filter aktiv", key="ov_use_ts_to")
-        ts_to = st.date_input("Timestamp bis", value=date.today(), key="ov_filter_ts_to")
-
-    sort_col, sort_dir_col = st.columns(2)
-    with sort_col:
-        sort_by = st.selectbox(
-            "Sortieren nach",
-            options=["ID", "Buchstabe des ausgewählten Bildes", "Timestamp"],
-            key="ov_sort_by",
-        )
-    with sort_dir_col:
-        sort_dir = st.selectbox("Richtung", options=["Absteigend", "Aufsteigend"], key="ov_sort_dir")
-
-    filtered_rows = rows
-
-    if id_filter.strip():
-        filtered_rows = [r for r in filtered_rows if id_filter.strip() in str(r["id"])]
-    if has_image_a == "Hat Bild":
-        filtered_rows = [r for r in filtered_rows if bool(r["image_a_png"])]
-    if has_image_b == "Hat Bild":
-        filtered_rows = [r for r in filtered_rows if bool(r["image_b_png"])]
-    if has_diff == "Hat Bild":
-        filtered_rows = [r for r in filtered_rows if bool(r["diff_a_to_b_png"])]
-    if has_selected_image == "Hat Bild":
-        filtered_rows = [r for r in filtered_rows if bool(r["selected_image_png"])]
-    if selected_letter_filter != "Alle":
-        filtered_rows = [r for r in filtered_rows if r["selected_letter"] == selected_letter_filter]
-    if timestamp_filter.strip():
-        filtered_rows = [r for r in filtered_rows if timestamp_filter.strip() in r["timestamp"]]
-
-    def parse_iso_date(value: str) -> date | None:
-        try:
-            return datetime.fromisoformat(value).date()
-        except ValueError:
-            return None
-
-    if use_ts_from:
-        filtered_rows = [
-            r for r in filtered_rows if (parsed := parse_iso_date(r["timestamp"])) is not None and parsed >= ts_from
-        ]
-    if use_ts_to:
-        filtered_rows = [
-            r for r in filtered_rows if (parsed := parse_iso_date(r["timestamp"])) is not None and parsed <= ts_to
-        ]
-
-    reverse_sort = sort_dir == "Absteigend"
-    if sort_by == "ID":
-        filtered_rows = sorted(filtered_rows, key=lambda r: r["id"], reverse=reverse_sort)
-    elif sort_by == "Buchstabe des ausgewählten Bildes":
-        filtered_rows = sorted(filtered_rows, key=lambda r: r["selected_letter"], reverse=reverse_sort)
-    else:
-        filtered_rows = sorted(filtered_rows, key=lambda r: r["timestamp"], reverse=reverse_sort)
-
-    st.caption(f"Treffer: {len(filtered_rows)} / {len(rows)}")
-    if not filtered_rows:
-        st.warning("Keine Zeilen entsprechen den aktuellen Filtern.")
-        return
-
-    headers = [
-        "ID",
-        "Bild A",
-        "Bild B",
-        "Difference A to B",
-        "Ausgewähltes Bild (als Bild)",
-        "Buchstabe des Ausgewählten Bildes",
-        "Timestamp",
+    table_rows = [
+        {
+            "ID": r["id"],
+            "Bild A": blob_to_data_uri(r["image_a_png"]),
+            "Bild B": blob_to_data_uri(r["image_b_png"]),
+            "Difference A to B": blob_to_data_uri(r["diff_a_to_b_png"]),
+            "Ausgewähltes Bild (als Bild)": blob_to_data_uri(r["selected_image_png"]),
+            "Buchstabe des Ausgewählten Bildes": r["selected_letter"],
+            "Timestamp": r["timestamp"],
+        }
+        for r in rows
     ]
-    widths = [0.7, 1.3, 1.3, 1.3, 1.3, 1.2, 1.4]
+    df = pd.DataFrame(table_rows)
 
-    header_cols = st.columns(widths)
-    for col, title in zip(header_cols, headers):
-        col.markdown(f"**{title}**")
+    img_renderer = JsCode(
+        """
+        class ImgCellRenderer {
+          init(params) {
+            this.eGui = document.createElement('img');
+            this.eGui.src = params.value || '';
+            this.eGui.style.height = '72px';
+            this.eGui.style.width = 'auto';
+            this.eGui.style.display = 'block';
+            this.eGui.style.margin = '4px auto';
+          }
+          getGui() {
+            return this.eGui;
+          }
+        }
+        """
+    )
 
-    for row in filtered_rows:
-        cols = st.columns(widths)
-        cols[0].write(row["id"])
-        cols[1].image(row["image_a_png"], use_container_width=True)
-        cols[2].image(row["image_b_png"], use_container_width=True)
-        cols[3].image(row["diff_a_to_b_png"], use_container_width=True)
-        cols[4].image(row["selected_image_png"], use_container_width=True)
-        cols[5].write(row["selected_letter"])
-        cols[6].write(row["timestamp"])
-        st.divider()
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_default_column(filter=True, floatingFilter=True, resizable=True)
+    gb.configure_column("ID", type=["numericColumn"], sortable=True, sort="desc")
+    gb.configure_column("Buchstabe des Ausgewählten Bildes", sortable=True)
+    gb.configure_column("Timestamp", sortable=True)
+    gb.configure_column("Bild A", cellRenderer=img_renderer, autoHeight=True)
+    gb.configure_column("Bild B", cellRenderer=img_renderer, autoHeight=True)
+    gb.configure_column("Difference A to B", cellRenderer=img_renderer, autoHeight=True)
+    gb.configure_column("Ausgewähltes Bild (als Bild)", cellRenderer=img_renderer, autoHeight=True)
+    gb.configure_grid_options(rowHeight=84)
+
+    AgGrid(
+        df,
+        gridOptions=gb.build(),
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True,
+        height=620,
+        theme="streamlit",
+    )
 
 
 def render_admin_mode() -> None:

@@ -56,6 +56,7 @@ streamlit run app.py
     - `Ausgewähltes Bild (als Bild)`
     - `Buchstabe des Ausgewählten Bildes`
     - `Timestamp`
+  - Filter und Sortierung sind direkt im Tabellen-Header integriert (Excel-ähnlich, Floating Filter).
 - **Admin** (nur für Admin-Benutzer sichtbar):
   - Benutzerliste
   - Benutzer hinzufügen (E-Mail + Passwort)
