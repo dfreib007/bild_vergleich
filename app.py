@@ -6,8 +6,10 @@ import hmac
 import io
 import os
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -624,6 +626,24 @@ def find_logo_path() -> Path | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def get_build_label() -> str:
+    build_number = os.getenv("BUILD_NUMBER", "").strip()
+    commit_sha = os.getenv("STREAMLIT_GIT_COMMIT_SHA", "").strip()
+    if not commit_sha:
+        try:
+            commit_sha = (
+                subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL)
+                .strip()
+            )
+        except Exception:
+            commit_sha = "unknown"
+
+    if build_number:
+        return f"build {build_number} | commit {commit_sha}"
+    return f"commit {commit_sha}"
+
+
 def render_header() -> bool:
     user = st.session_state.get("auth_user")
     is_admin = bool(user and user.get("is_admin"))
@@ -633,6 +653,7 @@ def render_header() -> bool:
     with col_logo:
         if logo_path is not None:
             st.image(str(logo_path), use_container_width=True)
+        st.caption(get_build_label())
     with col_title:
         st.title("Bildvergleich")
     with col_admin:
