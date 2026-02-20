@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import base64
 import hashlib
 import hmac
 import io
@@ -563,11 +562,6 @@ def save_interaction_result(
         conn.commit()
 
 
-def blob_to_data_uri(image_blob: bytes) -> str:
-    encoded = base64.b64encode(image_blob).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
-
-
 def list_interaction_overview_rows() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
@@ -591,13 +585,13 @@ def list_interaction_overview_rows() -> list[dict[str, Any]]:
         selected_blob = row["reference_a_png"] if selected_letter == "A" else row["comparison_b_png"]
         result.append(
             {
-                "ID": int(row["id"]),
-                "Bild A": blob_to_data_uri(row["reference_a_png"]),
-                "Bild B": blob_to_data_uri(row["comparison_b_png"]),
-                "Difference A to B": blob_to_data_uri(row["difference_a_to_b_png"]),
-                "Ausgewähltes Bild (als Bild)": blob_to_data_uri(selected_blob),
-                "Buchstabe des Ausgewählten Bildes": selected_letter,
-                "Timestamp": row["created_at"],
+                "id": int(row["id"]),
+                "image_a_png": row["reference_a_png"],
+                "image_b_png": row["comparison_b_png"],
+                "diff_a_to_b_png": row["difference_a_to_b_png"],
+                "selected_image_png": selected_blob,
+                "selected_letter": selected_letter,
+                "timestamp": row["created_at"],
             }
         )
     return result
@@ -1076,20 +1070,31 @@ def render_overview_mode() -> None:
         st.info("Noch keine Einträge aus dem Interaktion Modus vorhanden.")
         return
 
-    st.dataframe(
-        rows,
-        use_container_width=True,
-        row_height=120,
-        column_config={
-            "Bild A": st.column_config.ImageColumn("Bild A"),
-            "Bild B": st.column_config.ImageColumn("Bild B"),
-            "Difference A to B": st.column_config.ImageColumn("Difference A to B"),
-            "Ausgewähltes Bild (als Bild)": st.column_config.ImageColumn("Ausgewähltes Bild (als Bild)"),
-            "ID": st.column_config.NumberColumn("ID", format="%d"),
-            "Buchstabe des Ausgewählten Bildes": st.column_config.TextColumn("Buchstabe des Ausgewählten Bildes"),
-            "Timestamp": st.column_config.TextColumn("Timestamp"),
-        },
-    )
+    headers = [
+        "ID",
+        "Bild A",
+        "Bild B",
+        "Difference A to B",
+        "Ausgewähltes Bild (als Bild)",
+        "Buchstabe des Ausgewählten Bildes",
+        "Timestamp",
+    ]
+    widths = [0.7, 1.3, 1.3, 1.3, 1.3, 1.2, 1.4]
+
+    header_cols = st.columns(widths)
+    for col, title in zip(header_cols, headers):
+        col.markdown(f"**{title}**")
+
+    for row in rows:
+        cols = st.columns(widths)
+        cols[0].write(row["id"])
+        cols[1].image(row["image_a_png"], use_container_width=True)
+        cols[2].image(row["image_b_png"], use_container_width=True)
+        cols[3].image(row["diff_a_to_b_png"], use_container_width=True)
+        cols[4].image(row["selected_image_png"], use_container_width=True)
+        cols[5].write(row["selected_letter"])
+        cols[6].write(row["timestamp"])
+        st.divider()
 
 
 def render_admin_mode() -> None:
