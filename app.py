@@ -9,11 +9,10 @@ import os
 import sqlite3
 import subprocess
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import cv2
 import numpy as np
@@ -23,65 +22,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
-try:
-    import psycopg
-    from psycopg import errors as pg_errors
-    from psycopg.rows import dict_row
-except Exception:  # pragma: no cover - optional at runtime depending on backend
-    psycopg = None
-    pg_errors = None
-    dict_row = None
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 DB_PATH = Path("interaktion_results.db")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-DEFAULT_ADMIN_EMAIL = os.getenv("APP_BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
-DEFAULT_ADMIN_PASSWORD = os.getenv("APP_BOOTSTRAP_ADMIN_PASSWORD", "")
-MAX_LOGIN_ATTEMPTS = int(os.getenv("APP_MAX_LOGIN_ATTEMPTS", "5"))
-LOGIN_LOCKOUT_MINUTES = int(os.getenv("APP_LOGIN_LOCKOUT_MINUTES", "15"))
-SHOW_BUILD_INFO = os.getenv("APP_SHOW_BUILD_INFO", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse_iso_utc(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _password_meets_minimum(password: str) -> bool:
-    return len(password) >= 12
-
-
-def _batch_allowed_roots() -> list[Path]:
-    raw = os.getenv("APP_ALLOWED_IMAGE_ROOTS", "").strip()
-    if not raw:
-        return [Path.cwd().resolve()]
-
-    roots: list[Path] = []
-    for item in raw.split(","):
-        candidate = item.strip()
-        if not candidate:
-            continue
-        roots.append(Path(candidate).expanduser().resolve())
-    return roots or [Path.cwd().resolve()]
-
-
-def _is_path_within(candidate: Path, root: Path) -> bool:
-    try:
-        candidate.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
+DEFAULT_ADMIN_EMAIL = os.getenv("APP_BOOTSTRAP_ADMIN_EMAIL", "admin@bildvergleich.local").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("APP_BOOTSTRAP_ADMIN_PASSWORD", "Admin1234!")
 
 
 @dataclass
@@ -112,62 +57,16 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def _use_postgres() -> bool:
-    return DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")
-
-
-def _db_target_label() -> str:
-    return "Supabase PostgreSQL" if _use_postgres() else str(DB_PATH.resolve())
-
-
-def _normalize_database_url(raw_url: str) -> str:
-    if not raw_url:
-        return raw_url
-    if "[YOUR-PASSWORD]" in raw_url:
-        raise RuntimeError("DATABASE_URL enthält noch [YOUR-PASSWORD]. Bitte echtes Passwort setzen.")
-
-    parsed = urlparse(raw_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.setdefault("sslmode", "require")
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
-def _db_query(sql: str) -> str:
-    return sql.replace("?", "%s") if _use_postgres() else sql
-
-
-def _is_unique_violation(exc: Exception) -> bool:
-    if isinstance(exc, sqlite3.IntegrityError):
-        return True
-    if pg_errors is not None and isinstance(exc, pg_errors.UniqueViolation):
-        return True
-    return getattr(exc, "sqlstate", None) == "23505"
-
-
-def get_db_connection() -> Any:
-    if _use_postgres():
-        if psycopg is None or dict_row is None:
-            raise RuntimeError("psycopg ist nicht installiert, aber DATABASE_URL ist auf PostgreSQL gesetzt.")
-        return psycopg.connect(_normalize_database_url(DATABASE_URL), row_factory=dict_row)
-
+def get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def ensure_users_schema(conn: Any) -> None:
-    if _use_postgres():
-        return
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-    if "failed_login_attempts" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0")
-    if "lockout_until" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN lockout_until TEXT")
-
-
 def init_database() -> None:
     with get_db_connection() as conn:
-        interaction_table_sql = """
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS interaction_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
@@ -179,160 +78,54 @@ def init_database() -> None:
                 selected_by TEXT NOT NULL
             )
             """
-        users_table_sql = """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
-                failed_login_attempts INTEGER NOT NULL DEFAULT 0,
-                lockout_until TEXT,
                 created_at TEXT NOT NULL
             )
             """
-        if _use_postgres():
-            interaction_table_sql = """
-            CREATE TABLE IF NOT EXISTS interaction_results (
-                id BIGSERIAL PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                reference_a_png BYTEA NOT NULL,
-                comparison_b_png BYTEA NOT NULL,
-                difference_a_to_b_png BYTEA NOT NULL,
-                difference_b_to_a_png BYTEA NOT NULL,
-                selected_image TEXT NOT NULL,
-                selected_by TEXT NOT NULL
-            )
-            """
-            users_table_sql = """
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGSERIAL PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                failed_login_attempts INTEGER NOT NULL DEFAULT 0,
-                lockout_until TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-
-        conn.execute(
-            interaction_table_sql
         )
-        conn.execute(
-            users_table_sql
-        )
-        ensure_users_schema(conn)
 
-        admin_flag_value = True if _use_postgres() else 1
-        admin_row = conn.execute(
-            _db_query("SELECT id FROM users WHERE is_admin = ? LIMIT 1"),
-            (admin_flag_value,),
-        ).fetchone()
+        admin_row = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
         if admin_row is None:
-            if not DEFAULT_ADMIN_EMAIL or not DEFAULT_ADMIN_PASSWORD:
-                raise RuntimeError(
-                    "Bootstrap admin credentials are missing. "
-                    "Set APP_BOOTSTRAP_ADMIN_EMAIL and APP_BOOTSTRAP_ADMIN_PASSWORD."
-                )
-            if not _password_meets_minimum(DEFAULT_ADMIN_PASSWORD):
-                raise RuntimeError("Bootstrap admin password is too weak. Minimum length is 12 characters.")
             conn.execute(
-                _db_query(
-                    """
-                    INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """
-                ),
+                """
+                INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                VALUES (?, ?, 1, 1, ?)
+                """,
                 (
                     DEFAULT_ADMIN_EMAIL,
                     hash_password(DEFAULT_ADMIN_PASSWORD),
-                    True if _use_postgres() else 1,
-                    True if _use_postgres() else 1,
-                    _utcnow().isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
                 ),
             )
-
-
-def record_failed_login(email: str) -> None:
-    normalized_email = email.strip().lower()
-    with get_db_connection() as conn:
-        row = conn.execute(
-            _db_query(
-                """
-                SELECT id, failed_login_attempts
-                FROM users
-                WHERE email = ?
-                LIMIT 1
-                """
-            ),
-            (normalized_email,),
-        ).fetchone()
-        if row is None:
-            return
-
-        failures = int(row["failed_login_attempts"]) + 1
-        if failures >= MAX_LOGIN_ATTEMPTS:
-            lockout_until = (_utcnow() + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)).isoformat()
-            conn.execute(
-                _db_query(
-                    """
-                    UPDATE users
-                    SET failed_login_attempts = 0, lockout_until = ?
-                    WHERE id = ?
-                    """
-                ),
-                (lockout_until, int(row["id"])),
-            )
-        else:
-            conn.execute(
-                _db_query("UPDATE users SET failed_login_attempts = ? WHERE id = ?"),
-                (failures, int(row["id"])),
-            )
-
-
-def clear_login_failures(user_id: int) -> None:
-    with get_db_connection() as conn:
-        conn.execute(
-            _db_query(
-                """
-                UPDATE users
-                SET failed_login_attempts = 0, lockout_until = NULL
-                WHERE id = ?
-                """
-            ),
-            (user_id,),
-        )
+        conn.commit()
 
 
 def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
     normalized_email = email.strip().lower()
     with get_db_connection() as conn:
         row = conn.execute(
-            _db_query(
-                """
-                SELECT id, email, password_hash, is_admin, is_active, failed_login_attempts, lockout_until
-                FROM users
-                WHERE email = ?
-                LIMIT 1
-                """
-            ),
+            """
+            SELECT id, email, password_hash, is_admin, is_active
+            FROM users
+            WHERE email = ?
+            LIMIT 1
+            """,
             (normalized_email,),
         ).fetchone()
 
     if row is None or int(row["is_active"]) != 1:
-        record_failed_login(normalized_email)
-        return None
-
-    lockout_until = _parse_iso_utc(row["lockout_until"])
-    if lockout_until is not None and lockout_until > _utcnow():
         return None
     if not verify_password(password, row["password_hash"]):
-        record_failed_login(normalized_email)
         return None
 
-    clear_login_failures(int(row["id"]))
     return {
         "id": int(row["id"]),
         "email": row["email"],
@@ -343,13 +136,11 @@ def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
 def list_users() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
-            _db_query(
-                """
-                SELECT id, email, is_admin, is_active, created_at
-                FROM users
-                ORDER BY id ASC
-                """
-            )
+            """
+            SELECT id, email, is_admin, is_active, created_at
+            FROM users
+            ORDER BY id ASC
+            """
         ).fetchall()
 
     return [
@@ -368,50 +159,40 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
     normalized_email = email.strip().lower()
     if not normalized_email or "@" not in normalized_email:
         return False, "Ungültige E-Mail-Adresse."
-    if not _password_meets_minimum(password):
-        return False, "Passwort muss mindestens 12 Zeichen haben."
+    if len(password) < 8:
+        return False, "Passwort muss mindestens 8 Zeichen haben."
 
     try:
         with get_db_connection() as conn:
             conn.execute(
-                _db_query(
-                    """
-                    INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """
-                ),
-                (
-                    normalized_email,
-                    hash_password(password),
-                    False if _use_postgres() else 0,
-                    True if _use_postgres() else 1,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
+                """
+                INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                VALUES (?, ?, 0, 1, ?)
+                """,
+                (normalized_email, hash_password(password), datetime.now(timezone.utc).isoformat()),
             )
-    except Exception as err:
-        if _is_unique_violation(err):
-            return False, "Benutzer existiert bereits."
-        raise
+            conn.commit()
+    except sqlite3.IntegrityError:
+        return False, "Benutzer existiert bereits."
 
     return True, "Benutzer wurde angelegt."
 
 
 def update_user_password(email: str, new_password: str) -> tuple[bool, str]:
     normalized_email = email.strip().lower()
-    if not _password_meets_minimum(new_password):
-        return False, "Passwort muss mindestens 12 Zeichen haben."
+    if len(new_password) < 8:
+        return False, "Passwort muss mindestens 8 Zeichen haben."
 
     with get_db_connection() as conn:
-        row = conn.execute(
-            _db_query("SELECT id FROM users WHERE email = ? LIMIT 1"), (normalized_email,)
-        ).fetchone()
+        row = conn.execute("SELECT id FROM users WHERE email = ? LIMIT 1", (normalized_email,)).fetchone()
         if row is None:
             return False, "Benutzer nicht gefunden."
 
         conn.execute(
-            _db_query("UPDATE users SET password_hash = ? WHERE email = ?"),
+            "UPDATE users SET password_hash = ? WHERE email = ?",
             (hash_password(new_password), normalized_email),
         )
+        conn.commit()
 
     return True, "Passwort aktualisiert."
 
@@ -420,7 +201,7 @@ def set_user_active(email: str, active: bool) -> tuple[bool, str]:
     normalized_email = email.strip().lower()
     with get_db_connection() as conn:
         row = conn.execute(
-            _db_query("SELECT id, is_admin FROM users WHERE email = ? LIMIT 1"), (normalized_email,)
+            "SELECT id, is_admin FROM users WHERE email = ? LIMIT 1", (normalized_email,)
         ).fetchone()
         if row is None:
             return False, "Benutzer nicht gefunden."
@@ -428,8 +209,8 @@ def set_user_active(email: str, active: bool) -> tuple[bool, str]:
         if int(row["is_admin"]) == 1 and not active:
             return False, "Admin kann nicht deaktiviert werden."
 
-        active_value = active if _use_postgres() else (1 if active else 0)
-        conn.execute(_db_query("UPDATE users SET is_active = ? WHERE email = ?"), (active_value, normalized_email))
+        conn.execute("UPDATE users SET is_active = ? WHERE email = ?", (1 if active else 0, normalized_email))
+        conn.commit()
 
     return True, "Benutzerstatus aktualisiert."
 
@@ -760,48 +541,45 @@ def save_interaction_result(
 
     with get_db_connection() as conn:
         conn.execute(
-            _db_query(
-                """
-                INSERT INTO interaction_results (
-                    created_at,
-                    reference_a_png,
-                    comparison_b_png,
-                    difference_a_to_b_png,
-                    difference_b_to_a_png,
-                    selected_image,
-                    selected_by
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """
-            ),
+            """
+            INSERT INTO interaction_results (
+                created_at,
+                reference_a_png,
+                comparison_b_png,
+                difference_a_to_b_png,
+                difference_b_to_a_png,
+                selected_image,
+                selected_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 created_at,
-                encode_png_bytes(image_a),
-                encode_png_bytes(image_b),
-                encode_png_bytes(diff_a_to_b),
-                encode_png_bytes(diff_b_to_a),
+                sqlite3.Binary(encode_png_bytes(image_a)),
+                sqlite3.Binary(encode_png_bytes(image_b)),
+                sqlite3.Binary(encode_png_bytes(diff_a_to_b)),
+                sqlite3.Binary(encode_png_bytes(diff_b_to_a)),
                 selected_image,
                 selected_by,
             ),
         )
+        conn.commit()
 
 
 def list_interaction_overview_rows() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
-            _db_query(
-                """
-                SELECT
-                    id,
-                    created_at,
-                    reference_a_png,
-                    comparison_b_png,
-                    difference_a_to_b_png,
-                    selected_image
-                FROM interaction_results
-                ORDER BY id DESC
-                """
-            )
+            """
+            SELECT
+                id,
+                created_at,
+                reference_a_png,
+                comparison_b_png,
+                difference_a_to_b_png,
+                selected_image
+            FROM interaction_results
+            ORDER BY id DESC
+            """
         ).fetchall()
 
     result: list[dict[str, Any]] = []
@@ -857,9 +635,6 @@ def find_logo_path() -> Path | None:
 
 @lru_cache(maxsize=1)
 def get_build_label() -> str:
-    if not SHOW_BUILD_INFO:
-        return ""
-
     build_number = os.getenv("BUILD_NUMBER", "").strip()
     commit_sha = os.getenv("STREAMLIT_GIT_COMMIT_SHA", "").strip()
     if not commit_sha:
@@ -928,14 +703,12 @@ def render_header() -> bool:
             if logo_path is not None:
                 st.image(str(logo_path), use_container_width=True)
         with title_col:
-            build_label = get_build_label()
-            build_html = f'<div class="app-header-build">{build_label}</div>' if build_label else ""
             st.markdown(
                 f"""
                 <div class="app-header-left">
                   <div class="app-header-title-wrap">
                     <div class="app-header-title">Bildvergleich</div>
-                    {build_html}
+                    <div class="app-header-build">{get_build_label()}</div>
                   </div>
                 </div>
                 """,
@@ -1139,16 +912,6 @@ def render_batch_mode() -> None:
 
     if not ref_root.is_dir() or not test_root.is_dir():
         st.error("Bitte zwei gültige Ordnerpfade angeben.")
-        return
-
-    allowed_roots = _batch_allowed_roots()
-    if not any(_is_path_within(ref_root, root) for root in allowed_roots):
-        allowed_text = ", ".join(str(root) for root in allowed_roots)
-        st.error(f"Referenz-Ordner liegt außerhalb der erlaubten Pfade: {allowed_text}")
-        return
-    if not any(_is_path_within(test_root, root) for root in allowed_roots):
-        allowed_text = ", ".join(str(root) for root in allowed_roots)
-        st.error(f"Test-Ordner liegt außerhalb der erlaubten Pfade: {allowed_text}")
         return
 
     ref_files = collect_images(ref_root, recursive=recursive)
@@ -1373,7 +1136,7 @@ def render_interaction_mode() -> None:
                 selected_image=selected_image,
                 selected_by=selected_by,
             )
-            st.success(f"Gespeichert in {_db_target_label()}")
+            st.success(f"Gespeichert in {DB_PATH.resolve()}")
         except ValueError as err:
             st.error(f"Speichern fehlgeschlagen: {err}")
 
@@ -1495,11 +1258,7 @@ def render_admin_mode() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Bildvergleich", layout="wide")
-    try:
-        init_database()
-    except RuntimeError as err:
-        st.error(f"Startup-Konfiguration unvollständig: {err}")
-        st.stop()
+    init_database()
 
     if "auth_user" not in st.session_state:
         st.session_state["auth_user"] = None

@@ -14,7 +14,7 @@ Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 - Download von Overlay/Mask/Diff als PNG, Kennzahlen als CSV und Vergleichsreport als PDF
 - Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
 - Interaktion-Modus mit beidseitigem Vergleich (A→B und B→A) und User-Entscheidung
-- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in PostgreSQL (Supabase)
+- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in SQLite
 - Übersichtsmodus mit Grid aller Interaktionsergebnisse inkl. Bildspalten
 
 ## Voraussetzungen
@@ -46,7 +46,7 @@ streamlit run app.py
   - Upload von Bild A und Bild B.
   - Vergleich in beide Richtungen (`A → B` und `B → A`) inkl. Visualisierung der Unterschiede.
   - User wählt anschließend das korrekte Bild (`Bild A` oder `Bild B`) aus.
-  - Ergebnis wird in der Datenbank gespeichert.
+  - Ergebnis wird in einer SQLite-Datenbank gespeichert.
 - **Übersicht**:
   - Zeigt alle Ergebnisse aus dem Interaktion-Modus in einem Grid:
     - `ID`
@@ -93,8 +93,7 @@ streamlit run app.py
   - Enthält pro Bildpaar Pfade, Status, SSIM, Regionsanzahl, Abweichungsfläche und Alignment-Status.
 
 ## Datenbank (Interaktion Modus)
-- Primär: Supabase PostgreSQL über `DATABASE_URL`
-- Fallback (wenn `DATABASE_URL` nicht gesetzt): `interaktion_results.db` im Projektverzeichnis
+- Datei: `interaktion_results.db` (im Projektverzeichnis)
 - Tabellen: `interaction_results`, `users`
 - Gespeicherte Felder:
   - Zeitstempel (`created_at`)
@@ -107,27 +106,12 @@ streamlit run app.py
 
 ## Login / Bootstrap-Admin
 - Beim ersten Start wird automatisch ein Admin-Benutzer angelegt.
-- Die Bootstrap-Werte müssen per Umgebungsvariablen gesetzt werden:
+- Default:
+  - E-Mail: `admin@bildvergleich.local`
+  - Passwort: `Admin1234!`
+- Für Deployment solltest du die Bootstrap-Werte per Umgebungsvariablen setzen:
   - `APP_BOOTSTRAP_ADMIN_EMAIL`
   - `APP_BOOTSTRAP_ADMIN_PASSWORD`
-- Mindestlänge für Passwörter: **12 Zeichen**.
-- Schutz gegen Brute-Force:
-  - `APP_MAX_LOGIN_ATTEMPTS` (Default: `5`)
-  - `APP_LOGIN_LOCKOUT_MINUTES` (Default: `15`)
-
-## Supabase / PostgreSQL Setup
-- Setze `DATABASE_URL` auf deinen Supabase-String, z. B.:
-  - `postgresql://postgres:<YOUR-PASSWORD>@db.oergudbtabjgyemnzlmr.supabase.co:5432/postgres`
-- Die App ergänzt automatisch `sslmode=require`, falls nicht vorhanden.
-- Der Platzhalter `[YOUR-PASSWORD]` ist nicht gültig und führt zu einem Startfehler, bis ein echtes Passwort gesetzt ist.
-
-## Security-relevante Runtime-Optionen
-- `APP_ALLOWED_IMAGE_ROOTS`:
-  - Kommagetrennte Liste erlaubter Basisverzeichnisse für den Batch-Modus.
-  - Wenn nicht gesetzt, ist nur das aktuelle Arbeitsverzeichnis erlaubt.
-- `APP_SHOW_BUILD_INFO`:
-  - Build-/Commit-Anzeige im Header.
-  - Default ist aus (`false`), um unnötige Versionsinfos nicht im UI zu zeigen.
 
 ## Tests & CI/CD
 - Automatisierte Tests liegen unter `/tests` und laufen mit `pytest`.

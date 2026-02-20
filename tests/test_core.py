@@ -16,12 +16,9 @@ import app
 @pytest.fixture
 def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "test_app.db"
-    monkeypatch.setattr(app, "DATABASE_URL", "")
     monkeypatch.setattr(app, "DB_PATH", db_path)
     monkeypatch.setattr(app, "DEFAULT_ADMIN_EMAIL", "admin@test.local")
-    monkeypatch.setattr(app, "DEFAULT_ADMIN_PASSWORD", "AdminStrong123!")
-    monkeypatch.setattr(app, "MAX_LOGIN_ATTEMPTS", 3)
-    monkeypatch.setattr(app, "LOGIN_LOCKOUT_MINUTES", 1)
+    monkeypatch.setattr(app, "DEFAULT_ADMIN_PASSWORD", "Admin1234!")
     app.init_database()
     return db_path
 
@@ -44,36 +41,28 @@ def test_init_database_bootstraps_single_admin(isolated_db: Path) -> None:
     assert admins[0]["email"] == "admin@test.local"
 
 
-def test_init_database_requires_bootstrap_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app, "DB_PATH", tmp_path / "missing_bootstrap.db")
-    monkeypatch.setattr(app, "DEFAULT_ADMIN_EMAIL", "")
-    monkeypatch.setattr(app, "DEFAULT_ADMIN_PASSWORD", "")
-    with pytest.raises(RuntimeError):
-        app.init_database()
-
-
 def test_create_user_and_authenticate(isolated_db: Path) -> None:
-    ok, _ = app.create_user("user@example.com", "StrongPass123!")
+    ok, _ = app.create_user("user@example.com", "StrongPass1")
     assert ok
-    auth = app.authenticate_user("user@example.com", "StrongPass123!")
+    auth = app.authenticate_user("user@example.com", "StrongPass1")
     assert auth is not None
     assert auth["email"] == "user@example.com"
     assert auth["is_admin"] is False
 
 
 def test_create_user_rejects_duplicate_email(isolated_db: Path) -> None:
-    ok1, _ = app.create_user("user@example.com", "StrongPass123!")
-    ok2, msg2 = app.create_user("user@example.com", "StrongPass123!")
+    ok1, _ = app.create_user("user@example.com", "StrongPass1")
+    ok2, msg2 = app.create_user("user@example.com", "StrongPass1")
     assert ok1 is True
     assert ok2 is False
     assert "existiert bereits" in msg2
 
 
 def test_set_user_active_blocks_login_when_deactivated(isolated_db: Path) -> None:
-    app.create_user("user@example.com", "StrongPass123!")
+    app.create_user("user@example.com", "StrongPass1")
     ok, _ = app.set_user_active("user@example.com", active=False)
     assert ok
-    assert app.authenticate_user("user@example.com", "StrongPass123!") is None
+    assert app.authenticate_user("user@example.com", "StrongPass1") is None
 
 
 def test_admin_cannot_be_deactivated(isolated_db: Path) -> None:
@@ -83,19 +72,11 @@ def test_admin_cannot_be_deactivated(isolated_db: Path) -> None:
 
 
 def test_update_user_password_changes_login_secret(isolated_db: Path) -> None:
-    app.create_user("user@example.com", "StrongPass123!")
-    ok, _ = app.update_user_password("user@example.com", "NewStrongPass234!")
+    app.create_user("user@example.com", "StrongPass1")
+    ok, _ = app.update_user_password("user@example.com", "NewStrongPass2")
     assert ok
-    assert app.authenticate_user("user@example.com", "StrongPass123!") is None
-    assert app.authenticate_user("user@example.com", "NewStrongPass234!") is not None
-
-
-def test_account_gets_locked_after_repeated_failed_logins(isolated_db: Path) -> None:
-    app.create_user("user@example.com", "StrongPass123!")
-    assert app.authenticate_user("user@example.com", "wrong-1") is None
-    assert app.authenticate_user("user@example.com", "wrong-2") is None
-    assert app.authenticate_user("user@example.com", "wrong-3") is None
-    assert app.authenticate_user("user@example.com", "StrongPass123!") is None
+    assert app.authenticate_user("user@example.com", "StrongPass1") is None
+    assert app.authenticate_user("user@example.com", "NewStrongPass2") is not None
 
 
 def test_run_comparison_identical_images_reports_no_regions() -> None:
