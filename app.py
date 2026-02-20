@@ -655,19 +655,46 @@ def render_header() -> bool:
     user = st.session_state.get("auth_user")
     is_admin = bool(user and user.get("is_admin"))
 
+    st.markdown(
+        """
+        <style>
+        .app-header-title {
+            font-size: 3rem;
+            font-weight: 700;
+            line-height: 1.05;
+            margin: 0;
+            padding: 0;
+        }
+        .app-header-user {
+            font-size: 0.95rem;
+            margin-top: 0.35rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .app-header-build {
+            font-size: 0.75rem;
+            opacity: 0.8;
+            margin-top: 0.2rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     logo_path = find_logo_path()
     col_logo, col_title, col_admin, col_user, col_logout = st.columns([1, 6, 1.2, 2, 1], vertical_alignment="center")
     with col_logo:
         if logo_path is not None:
             st.image(str(logo_path), use_container_width=True)
-        st.caption(get_build_label())
+        st.markdown(f"<div class='app-header-build'>{get_build_label()}</div>", unsafe_allow_html=True)
     with col_title:
-        st.title("Bildvergleich")
+        st.markdown("<div class='app-header-title'>Bildvergleich</div>", unsafe_allow_html=True)
     with col_admin:
         admin_clicked = st.button("Admin", disabled=not is_admin, use_container_width=True)
     with col_user:
         if user:
-            st.caption(user["email"])
+            st.markdown(f"<div class='app-header-user'>{user['email']}</div>", unsafe_allow_html=True)
     with col_logout:
         if st.button("Logout", use_container_width=True):
             st.session_state["auth_user"] = None
