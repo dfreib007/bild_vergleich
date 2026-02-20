@@ -3,7 +3,7 @@
 Kleine POC-App zum Vergleich von zwei Bildern mit **OpenCV** und **SSIM** (scikit-image).
 
 ## Features
-- Modusauswahl: **Single Vergleich** oder **Batch Modus**
+- Modusauswahl: **Single Vergleich**, **Batch Modus** oder **Interaktion Modus**
 - Upload von Referenzbild (Golden) und Testbild (PNG/JPG)
 - Optionales Alignment per ECC (`cv2.findTransformECC`) oder ORB + Homography
 - SSIM-Score (0..1)
@@ -12,6 +12,7 @@ Kleine POC-App zum Vergleich von zwei Bildern mit **OpenCV** und **SSIM** (sciki
 - Optionale Bounding Boxes und Heatmap-Overlay
 - Download von Overlay/Mask/Diff als PNG, Kennzahlen als CSV und Vergleichsreport als PDF
 - Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
+- Interaktion-Modus mit beidseitigem Vergleich (A→B und B→A) und User-Entscheidung
 
 ## Voraussetzungen
 - Python **3.9+**
@@ -38,6 +39,11 @@ streamlit run app.py
   - Dateien werden über identischen Dateinamen (nicht rekursiv) bzw. identischen relativen Pfad (rekursiv) gepaart.
   - Alle Paare werden nacheinander verglichen; Ergebnisliste + Batch-CSV stehen bereit.
   - Zusätzliche Vorschau für ein ausgewähltes Paar.
+- **Interaktion Modus**:
+  - Upload von Bild A und Bild B.
+  - Vergleich in beide Richtungen (`A → B` und `B → A`) inkl. Visualisierung der Unterschiede.
+  - User wählt anschließend das korrekte Bild (`Bild A` oder `Bild B`) aus.
+  - Ergebnis wird in einer SQLite-Datenbank gespeichert.
 
 ## Parameter erklärt
 - **Bilder automatisch ausrichten (Alignment)**:
@@ -67,6 +73,17 @@ streamlit run app.py
 
 - **Batch CSV**:
   - Enthält pro Bildpaar Pfade, Status, SSIM, Regionsanzahl, Abweichungsfläche und Alignment-Status.
+
+## Datenbank (Interaktion Modus)
+- Datei: `interaktion_results.db` (im Projektverzeichnis)
+- Tabelle: `interaction_results`
+- Gespeicherte Felder:
+  - Zeitstempel (`created_at`)
+  - Referenzbild A (`reference_a_png`)
+  - Vergleichsbild B (`comparison_b_png`)
+  - Unterschied A→B (`difference_a_to_b_png`)
+  - Unterschied B→A (`difference_b_to_a_png`)
+  - Vom User gewähltes korrektes Bild (`selected_image`)
 
 ## Größen- und Seitenverhältnis-Strategie
 - Die App verwendet das Referenzbild als geometrische Basis.

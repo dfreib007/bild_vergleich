@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import io
+import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+INTERACTION_DB_PATH = Path("interaktion_results.db")
 
 
 @dataclass
@@ -392,6 +395,59 @@ def render_header() -> None:
         )
 
 
+def init_interaction_db() -> None:
+    with sqlite3.connect(INTERACTION_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interaction_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                reference_a_png BLOB NOT NULL,
+                comparison_b_png BLOB NOT NULL,
+                difference_a_to_b_png BLOB NOT NULL,
+                difference_b_to_a_png BLOB NOT NULL,
+                selected_image TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def save_interaction_result(
+    image_a: np.ndarray,
+    image_b: np.ndarray,
+    diff_a_to_b: np.ndarray,
+    diff_b_to_a: np.ndarray,
+    selected_image: str,
+) -> None:
+    init_interaction_db()
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(INTERACTION_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO interaction_results (
+                created_at,
+                reference_a_png,
+                comparison_b_png,
+                difference_a_to_b_png,
+                difference_b_to_a_png,
+                selected_image
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                sqlite3.Binary(encode_png_bytes(image_a)),
+                sqlite3.Binary(encode_png_bytes(image_b)),
+                sqlite3.Binary(encode_png_bytes(diff_a_to_b)),
+                sqlite3.Binary(encode_png_bytes(diff_b_to_a)),
+                selected_image,
+            ),
+        )
+        conn.commit()
+
+
 def render_common_controls(key_prefix: str) -> tuple[bool, str, int, int, bool, bool]:
     align_enabled = st.checkbox("Bilder automatisch ausrichten (Alignment)", value=True, key=f"align_{key_prefix}")
     alignment_method = "ECC (Affine)"
@@ -690,14 +746,125 @@ def render_batch_mode() -> None:
         st.image(to_rgb(preview_result["overlay"]), caption="Overlay", use_container_width=True)
 
 
+def render_interaction_mode() -> None:
+    st.subheader("Interaktion Modus")
+    col_left, col_right = st.columns(2)
+    with col_left:
+        image_a_file = st.file_uploader(
+            "Bild A hochladen",
+            type=["png", "jpg", "jpeg"],
+            key="img_a_interaction",
+        )
+    with col_right:
+        image_b_file = st.file_uploader(
+            "Bild B hochladen",
+            type=["png", "jpg", "jpeg"],
+            key="img_b_interaction",
+        )
+
+    align_enabled, alignment_method, threshold_value, min_area, show_boxes, show_heatmap = render_common_controls(
+        "interaction"
+    )
+
+    if not image_a_file or not image_b_file:
+        st.info("Bitte Bild A und Bild B hochladen.")
+        return
+
+    try:
+        image_a_bgr = load_image(image_a_file)
+        image_b_bgr = load_image(image_b_file)
+    except ValueError as err:
+        st.error(str(err))
+        return
+
+    result_a_to_b = run_comparison(
+        ref_bgr=image_a_bgr,
+        test_bgr=image_b_bgr,
+        threshold_value=threshold_value,
+        min_area=min_area,
+        align_enabled=align_enabled,
+        alignment_method=alignment_method,
+        show_boxes=show_boxes,
+        show_heatmap=show_heatmap,
+    )
+    result_b_to_a = run_comparison(
+        ref_bgr=image_b_bgr,
+        test_bgr=image_a_bgr,
+        threshold_value=threshold_value,
+        min_area=min_area,
+        align_enabled=align_enabled,
+        alignment_method=alignment_method,
+        show_boxes=show_boxes,
+        show_heatmap=show_heatmap,
+    )
+
+    st.markdown("**Vergleich A → B**")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        st.image(to_rgb(result_a_to_b["ref_bgr"]), caption="Referenz: Bild A", use_container_width=True)
+    with a2:
+        st.image(to_rgb(result_a_to_b["test_bgr"]), caption="Vergleich: Bild B", use_container_width=True)
+    with a3:
+        st.image(to_rgb(result_a_to_b["overlay"]), caption="Unterschied A → B", use_container_width=True)
+
+    st.markdown("**Vergleich B → A**")
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        st.image(to_rgb(result_b_to_a["ref_bgr"]), caption="Referenz: Bild B", use_container_width=True)
+    with b2:
+        st.image(to_rgb(result_b_to_a["test_bgr"]), caption="Vergleich: Bild A", use_container_width=True)
+    with b3:
+        st.image(to_rgb(result_b_to_a["overlay"]), caption="Unterschied B → A", use_container_width=True)
+
+    m1, m2 = st.columns(2)
+    with m1:
+        st.metric("SSIM A → B", f"{result_a_to_b['score']:.4f}")
+        st.caption(
+            f"Regionen: {result_a_to_b['region_stats'].count}, "
+            f"Fläche: {result_a_to_b['region_stats'].total_area} px ({result_a_to_b['area_percent']:.2f}%)"
+        )
+    with m2:
+        st.metric("SSIM B → A", f"{result_b_to_a['score']:.4f}")
+        st.caption(
+            f"Regionen: {result_b_to_a['region_stats'].count}, "
+            f"Fläche: {result_b_to_a['region_stats'].total_area} px ({result_b_to_a['area_percent']:.2f}%)"
+        )
+
+    selected_image = st.radio(
+        "Welches Bild ist korrekt (fehlerfrei)?",
+        options=["Bild A", "Bild B"],
+        horizontal=True,
+        key="interaction_selected_image",
+    )
+
+    if st.button("Auswahl speichern", type="primary", key="interaction_save_button"):
+        try:
+            save_interaction_result(
+                image_a=result_a_to_b["ref_bgr"],
+                image_b=result_a_to_b["test_bgr"],
+                diff_a_to_b=result_a_to_b["overlay"],
+                diff_b_to_a=result_b_to_a["overlay"],
+                selected_image=selected_image,
+            )
+            st.success(f"Gespeichert in {INTERACTION_DB_PATH.resolve()}")
+        except ValueError as err:
+            st.error(f"Speichern fehlgeschlagen: {err}")
+
+
 def main() -> None:
     st.set_page_config(page_title="Bildvergleich", layout="wide")
     render_header()
 
-    mode = st.selectbox("Modus", options=["Single Vergleich", "Batch Modus"], index=0)
+    mode = st.selectbox(
+        "Modus",
+        options=["Single Vergleich", "Batch Modus", "Interaktion Modus"],
+        index=0,
+    )
 
     if mode == "Batch Modus":
         render_batch_mode()
+    elif mode == "Interaktion Modus":
+        render_interaction_mode()
     else:
         render_single_mode()
 
