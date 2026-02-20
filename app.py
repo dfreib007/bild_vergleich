@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,7 +20,9 @@ from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
-INTERACTION_DB_PATH = Path("interaktion_results.db")
+DB_PATH = Path("interaktion_results.db")
+DEFAULT_ADMIN_EMAIL = os.getenv("APP_BOOTSTRAP_ADMIN_EMAIL", "admin@bildvergleich.local").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("APP_BOOTSTRAP_ADMIN_PASSWORD", "Admin1234!")
 
 
 @dataclass
@@ -26,8 +31,187 @@ class RegionStats:
     total_area: int
 
 
+def hash_password(password: str, iterations: int = 210_000) -> str:
+    salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), iterations).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        algo, iterations_str, salt, digest = hashed.split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        check = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt),
+            int(iterations_str),
+        ).hex()
+        return hmac.compare_digest(check, digest)
+    except (ValueError, TypeError):
+        return False
+
+
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_database() -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interaction_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                reference_a_png BLOB NOT NULL,
+                comparison_b_png BLOB NOT NULL,
+                difference_a_to_b_png BLOB NOT NULL,
+                difference_b_to_a_png BLOB NOT NULL,
+                selected_image TEXT NOT NULL,
+                selected_by TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        admin_row = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
+        if admin_row is None:
+            conn.execute(
+                """
+                INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                VALUES (?, ?, 1, 1, ?)
+                """,
+                (
+                    DEFAULT_ADMIN_EMAIL,
+                    hash_password(DEFAULT_ADMIN_PASSWORD),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        conn.commit()
+
+
+def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
+    normalized_email = email.strip().lower()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, password_hash, is_admin, is_active
+            FROM users
+            WHERE email = ?
+            LIMIT 1
+            """,
+            (normalized_email,),
+        ).fetchone()
+
+    if row is None or int(row["is_active"]) != 1:
+        return None
+    if not verify_password(password, row["password_hash"]):
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "email": row["email"],
+        "is_admin": bool(row["is_admin"]),
+    }
+
+
+def list_users() -> list[dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, email, is_admin, is_active, created_at
+            FROM users
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    return [
+        {
+            "id": int(row["id"]),
+            "email": row["email"],
+            "is_admin": bool(row["is_admin"]),
+            "is_active": bool(row["is_active"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def create_user(email: str, password: str) -> tuple[bool, str]:
+    normalized_email = email.strip().lower()
+    if not normalized_email or "@" not in normalized_email:
+        return False, "Ungültige E-Mail-Adresse."
+    if len(password) < 8:
+        return False, "Passwort muss mindestens 8 Zeichen haben."
+
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                VALUES (?, ?, 0, 1, ?)
+                """,
+                (normalized_email, hash_password(password), datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        return False, "Benutzer existiert bereits."
+
+    return True, "Benutzer wurde angelegt."
+
+
+def update_user_password(email: str, new_password: str) -> tuple[bool, str]:
+    normalized_email = email.strip().lower()
+    if len(new_password) < 8:
+        return False, "Passwort muss mindestens 8 Zeichen haben."
+
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT id FROM users WHERE email = ? LIMIT 1", (normalized_email,)).fetchone()
+        if row is None:
+            return False, "Benutzer nicht gefunden."
+
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE email = ?",
+            (hash_password(new_password), normalized_email),
+        )
+        conn.commit()
+
+    return True, "Passwort aktualisiert."
+
+
+def set_user_active(email: str, active: bool) -> tuple[bool, str]:
+    normalized_email = email.strip().lower()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT id, is_admin FROM users WHERE email = ? LIMIT 1", (normalized_email,)
+        ).fetchone()
+        if row is None:
+            return False, "Benutzer nicht gefunden."
+
+        if int(row["is_admin"]) == 1 and not active:
+            return False, "Admin kann nicht deaktiviert werden."
+
+        conn.execute("UPDATE users SET is_active = ? WHERE email = ?", (1 if active else 0, normalized_email))
+        conn.commit()
+
+    return True, "Benutzerstatus aktualisiert."
+
+
 def load_image(file: Any) -> np.ndarray:
-    """Decode uploaded image file to BGR ndarray."""
     file_bytes = np.frombuffer(file.read(), dtype=np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if image is None:
@@ -47,20 +231,10 @@ def align_images_ecc(ref: np.ndarray, test: np.ndarray) -> tuple[np.ndarray, np.
     test_gray = cv2.cvtColor(test, cv2.COLOR_BGR2GRAY)
 
     warp_matrix = np.eye(2, 3, dtype=np.float32)
-    criteria = (
-        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-        200,
-        1e-6,
-    )
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6)
 
     try:
-        cc, warp_matrix = cv2.findTransformECC(
-            ref_gray,
-            test_gray,
-            warp_matrix,
-            cv2.MOTION_AFFINE,
-            criteria,
-        )
+        cc, warp_matrix = cv2.findTransformECC(ref_gray, test_gray, warp_matrix, cv2.MOTION_AFFINE, criteria)
         aligned = cv2.warpAffine(
             test,
             warp_matrix,
@@ -351,12 +525,45 @@ def make_pdf_report_bytes(
     return buf.getvalue()
 
 
-def collect_images(folder: Path, recursive: bool) -> dict[str, Path]:
-    if recursive:
-        candidates = folder.rglob("*")
-    else:
-        candidates = folder.glob("*")
+def save_interaction_result(
+    image_a: np.ndarray,
+    image_b: np.ndarray,
+    diff_a_to_b: np.ndarray,
+    diff_b_to_a: np.ndarray,
+    selected_image: str,
+    selected_by: str,
+) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
 
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO interaction_results (
+                created_at,
+                reference_a_png,
+                comparison_b_png,
+                difference_a_to_b_png,
+                difference_b_to_a_png,
+                selected_image,
+                selected_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                sqlite3.Binary(encode_png_bytes(image_a)),
+                sqlite3.Binary(encode_png_bytes(image_b)),
+                sqlite3.Binary(encode_png_bytes(diff_a_to_b)),
+                sqlite3.Binary(encode_png_bytes(diff_b_to_a)),
+                selected_image,
+                selected_by,
+            ),
+        )
+        conn.commit()
+
+
+def collect_images(folder: Path, recursive: bool) -> dict[str, Path]:
+    candidates = folder.rglob("*") if recursive else folder.glob("*")
     files: dict[str, Path] = {}
     for path in candidates:
         if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -382,70 +589,49 @@ def find_logo_path() -> Path | None:
     return None
 
 
-def render_header() -> None:
+def render_header() -> bool:
+    user = st.session_state.get("auth_user")
+    is_admin = bool(user and user.get("is_admin"))
+
     logo_path = find_logo_path()
-    col_logo, col_title = st.columns([1, 6], vertical_alignment="center")
+    col_logo, col_title, col_admin, col_user, col_logout = st.columns([1, 6, 1.2, 2, 1], vertical_alignment="center")
     with col_logo:
         if logo_path is not None:
             st.image(str(logo_path), use_container_width=True)
     with col_title:
         st.title("Bildvergleich")
-        st.markdown(
-            "Vergleicht ein Golden Image mit einem Testbild und visualisiert Abweichungen als Maske/Overlay."
-        )
+    with col_admin:
+        admin_clicked = st.button("Admin", disabled=not is_admin, use_container_width=True)
+    with col_user:
+        if user:
+            st.caption(user["email"])
+    with col_logout:
+        if st.button("Logout", use_container_width=True):
+            st.session_state["auth_user"] = None
+            st.session_state["selected_mode"] = "Single Vergleich"
+            st.rerun()
+
+    st.markdown("Vergleicht ein Golden Image mit einem Testbild und visualisiert Abweichungen als Maske/Overlay.")
+    return bool(admin_clicked)
 
 
-def init_interaction_db() -> None:
-    with sqlite3.connect(INTERACTION_DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS interaction_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                reference_a_png BLOB NOT NULL,
-                comparison_b_png BLOB NOT NULL,
-                difference_a_to_b_png BLOB NOT NULL,
-                difference_b_to_a_png BLOB NOT NULL,
-                selected_image TEXT NOT NULL
-            )
-            """
-        )
-        conn.commit()
+def render_login() -> None:
+    st.subheader("Login")
+    st.caption("Bitte mit E-Mail-Adresse und Passwort anmelden.")
 
+    with st.form("login_form", clear_on_submit=False):
+        email = st.text_input("E-Mail")
+        password = st.text_input("Passwort", type="password")
+        submitted = st.form_submit_button("Anmelden", type="primary")
 
-def save_interaction_result(
-    image_a: np.ndarray,
-    image_b: np.ndarray,
-    diff_a_to_b: np.ndarray,
-    diff_b_to_a: np.ndarray,
-    selected_image: str,
-) -> None:
-    init_interaction_db()
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    with sqlite3.connect(INTERACTION_DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO interaction_results (
-                created_at,
-                reference_a_png,
-                comparison_b_png,
-                difference_a_to_b_png,
-                difference_b_to_a_png,
-                selected_image
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                created_at,
-                sqlite3.Binary(encode_png_bytes(image_a)),
-                sqlite3.Binary(encode_png_bytes(image_b)),
-                sqlite3.Binary(encode_png_bytes(diff_a_to_b)),
-                sqlite3.Binary(encode_png_bytes(diff_b_to_a)),
-                selected_image,
-            ),
-        )
-        conn.commit()
+    if submitted:
+        user = authenticate_user(email=email, password=password)
+        if user is None:
+            st.error("Ungültige Anmeldedaten oder Benutzer deaktiviert.")
+            return
+        st.session_state["auth_user"] = user
+        st.session_state["selected_mode"] = "Single Vergleich"
+        st.rerun()
 
 
 def render_common_controls(key_prefix: str) -> tuple[bool, str, int, int, bool, bool]:
@@ -588,12 +774,7 @@ def render_single_mode() -> None:
     with d4:
         st.download_button("Metriken CSV", data=csv_bytes, file_name="metrics.csv", mime="text/csv")
     with d5:
-        st.download_button(
-            "Report PDF",
-            data=pdf_bytes,
-            file_name="vergleich_report.pdf",
-            mime="application/pdf",
-        )
+        st.download_button("Report PDF", data=pdf_bytes, file_name="vergleich_report.pdf", mime="application/pdf")
 
 
 def render_batch_mode() -> None:
@@ -750,17 +931,9 @@ def render_interaction_mode() -> None:
     st.subheader("Interaktion Modus")
     col_left, col_right = st.columns(2)
     with col_left:
-        image_a_file = st.file_uploader(
-            "Bild A hochladen",
-            type=["png", "jpg", "jpeg"],
-            key="img_a_interaction",
-        )
+        image_a_file = st.file_uploader("Bild A hochladen", type=["png", "jpg", "jpeg"], key="img_a_interaction")
     with col_right:
-        image_b_file = st.file_uploader(
-            "Bild B hochladen",
-            type=["png", "jpg", "jpeg"],
-            key="img_b_interaction",
-        )
+        image_b_file = st.file_uploader("Bild B hochladen", type=["png", "jpg", "jpeg"], key="img_b_interaction")
 
     align_enabled, alignment_method, threshold_value, min_area, show_boxes, show_heatmap = render_common_controls(
         "interaction"
@@ -837,6 +1010,9 @@ def render_interaction_mode() -> None:
         key="interaction_selected_image",
     )
 
+    user = st.session_state.get("auth_user")
+    selected_by = user["email"] if user else "unknown"
+
     if st.button("Auswahl speichern", type="primary", key="interaction_save_button"):
         try:
             save_interaction_result(
@@ -845,26 +1021,101 @@ def render_interaction_mode() -> None:
                 diff_a_to_b=result_a_to_b["overlay"],
                 diff_b_to_a=result_b_to_a["overlay"],
                 selected_image=selected_image,
+                selected_by=selected_by,
             )
-            st.success(f"Gespeichert in {INTERACTION_DB_PATH.resolve()}")
+            st.success(f"Gespeichert in {DB_PATH.resolve()}")
         except ValueError as err:
             st.error(f"Speichern fehlgeschlagen: {err}")
 
 
+def render_admin_mode() -> None:
+    st.subheader("Admin")
+    st.caption("Benutzerverwaltung")
+
+    users = list_users()
+    st.dataframe(users, use_container_width=True)
+
+    with st.form("admin_create_user"):
+        st.markdown("**Neuen Benutzer anlegen**")
+        new_email = st.text_input("E-Mail", key="new_user_email")
+        new_password = st.text_input("Passwort", type="password", key="new_user_password")
+        create_submit = st.form_submit_button("Benutzer hinzufügen")
+    if create_submit:
+        ok, msg = create_user(new_email, new_password)
+        if ok:
+            st.success(msg)
+            st.rerun()
+        else:
+            st.error(msg)
+
+    with st.form("admin_update_password"):
+        st.markdown("**Passwort ändern**")
+        email_options = [u["email"] for u in users]
+        target_email = st.selectbox("Benutzer", options=email_options, key="pw_target_email") if email_options else ""
+        updated_password = st.text_input("Neues Passwort", type="password", key="pw_new_password")
+        pw_submit = st.form_submit_button("Passwort speichern")
+    if pw_submit and target_email:
+        ok, msg = update_user_password(target_email, updated_password)
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+
+    with st.form("admin_toggle_active"):
+        st.markdown("**Benutzer aktiv/deaktivieren**")
+        email_options = [u["email"] for u in users]
+        toggle_email = st.selectbox("Benutzer auswählen", options=email_options, key="toggle_email") if email_options else ""
+        active_choice = st.radio("Status", options=["Aktiv", "Deaktiviert"], horizontal=True, key="toggle_status")
+        toggle_submit = st.form_submit_button("Status speichern")
+    if toggle_submit and toggle_email:
+        ok, msg = set_user_active(toggle_email, active_choice == "Aktiv")
+        if ok:
+            st.success(msg)
+            st.rerun()
+        else:
+            st.error(msg)
+
+
 def main() -> None:
     st.set_page_config(page_title="Bildvergleich", layout="wide")
-    render_header()
+    init_database()
 
-    mode = st.selectbox(
-        "Modus",
-        options=["Single Vergleich", "Batch Modus", "Interaktion Modus"],
-        index=0,
-    )
+    if "auth_user" not in st.session_state:
+        st.session_state["auth_user"] = None
+    if "selected_mode" not in st.session_state:
+        st.session_state["selected_mode"] = "Single Vergleich"
+
+    if st.session_state["auth_user"] is None:
+        render_login()
+        st.info(
+            f"Initialer Admin (nur beim ersten Start): {DEFAULT_ADMIN_EMAIL} / {DEFAULT_ADMIN_PASSWORD}. "
+            "Bitte nach dem ersten Login im Admin-Menü Passwort ändern."
+        )
+        return
+
+    admin_clicked = render_header()
+    auth_user = st.session_state["auth_user"]
+    is_admin = bool(auth_user.get("is_admin"))
+
+    options = ["Single Vergleich", "Batch Modus", "Interaktion Modus"]
+    if is_admin:
+        options.append("Admin")
+    if admin_clicked and is_admin:
+        st.session_state["selected_mode"] = "Admin"
+
+    current_mode = st.session_state.get("selected_mode", "Single Vergleich")
+    if current_mode not in options:
+        current_mode = "Single Vergleich"
+
+    mode = st.selectbox("Modus", options=options, index=options.index(current_mode), key="mode_select")
+    st.session_state["selected_mode"] = mode
 
     if mode == "Batch Modus":
         render_batch_mode()
     elif mode == "Interaktion Modus":
         render_interaction_mode()
+    elif mode == "Admin":
+        render_admin_mode()
     else:
         render_single_mode()
 

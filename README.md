@@ -14,6 +14,7 @@ Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 - Download von Overlay/Mask/Diff als PNG, Kennzahlen als CSV und Vergleichsreport als PDF
 - Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
 - Interaktion-Modus mit beidseitigem Vergleich (A→B und B→A) und User-Entscheidung
+- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in SQLite
 
 ## Voraussetzungen
 - Python **3.9+**
@@ -45,6 +46,11 @@ streamlit run app.py
   - Vergleich in beide Richtungen (`A → B` und `B → A`) inkl. Visualisierung der Unterschiede.
   - User wählt anschließend das korrekte Bild (`Bild A` oder `Bild B`) aus.
   - Ergebnis wird in einer SQLite-Datenbank gespeichert.
+- **Admin** (nur für Admin-Benutzer sichtbar):
+  - Benutzerliste
+  - Benutzer hinzufügen (E-Mail + Passwort)
+  - Passwort ändern
+  - Benutzer aktiv/deaktivieren
 
 ## Parameter erklärt
 - **Bilder automatisch ausrichten (Alignment)**:
@@ -77,7 +83,7 @@ streamlit run app.py
 
 ## Datenbank (Interaktion Modus)
 - Datei: `interaktion_results.db` (im Projektverzeichnis)
-- Tabelle: `interaction_results`
+- Tabellen: `interaction_results`, `users`
 - Gespeicherte Felder:
   - Zeitstempel (`created_at`)
   - Referenzbild A (`reference_a_png`)
@@ -85,6 +91,16 @@ streamlit run app.py
   - Unterschied A→B (`difference_a_to_b_png`)
   - Unterschied B→A (`difference_b_to_a_png`)
   - Vom User gewähltes korrektes Bild (`selected_image`)
+  - Benutzer, der ausgewählt hat (`selected_by`)
+
+## Login / Bootstrap-Admin
+- Beim ersten Start wird automatisch ein Admin-Benutzer angelegt.
+- Default:
+  - E-Mail: `admin@bildvergleich.local`
+  - Passwort: `Admin1234!`
+- Für Deployment solltest du die Bootstrap-Werte per Umgebungsvariablen setzen:
+  - `APP_BOOTSTRAP_ADMIN_EMAIL`
+  - `APP_BOOTSTRAP_ADMIN_PASSWORD`
 
 ## Größen- und Seitenverhältnis-Strategie
 - Die App verwendet das Referenzbild als geometrische Basis.
