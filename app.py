@@ -701,7 +701,6 @@ def render_header() -> bool:
             st.session_state["selected_mode"] = "Single Vergleich"
             st.rerun()
 
-    st.markdown("Vergleicht ein Golden Image mit einem Testbild und visualisiert Abweichungen als Maske/Overlay.")
     return bool(admin_clicked)
 
 
@@ -1272,7 +1271,14 @@ def main() -> None:
     if current_mode not in options:
         current_mode = "Single Vergleich"
 
-    mode = st.selectbox("Modus", options=options, index=options.index(current_mode), key="mode_select")
+    with st.sidebar:
+        st.markdown("### ☰ Menü")
+        mode = st.radio(
+            "Modus",
+            options=options,
+            index=options.index(current_mode),
+            key="mode_select",
+        )
     st.session_state["selected_mode"] = mode
 
     if mode == "Batch Modus":
