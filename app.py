@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import base64
 import hashlib
 import hmac
 import io
@@ -562,6 +563,46 @@ def save_interaction_result(
         conn.commit()
 
 
+def blob_to_data_uri(image_blob: bytes) -> str:
+    encoded = base64.b64encode(image_blob).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def list_interaction_overview_rows() -> list[dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                created_at,
+                reference_a_png,
+                comparison_b_png,
+                difference_a_to_b_png,
+                selected_image
+            FROM interaction_results
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        selected_label = row["selected_image"]
+        selected_letter = "A" if selected_label == "Bild A" else "B" if selected_label == "Bild B" else "?"
+        selected_blob = row["reference_a_png"] if selected_letter == "A" else row["comparison_b_png"]
+        result.append(
+            {
+                "ID": int(row["id"]),
+                "Bild A": blob_to_data_uri(row["reference_a_png"]),
+                "Bild B": blob_to_data_uri(row["comparison_b_png"]),
+                "Difference A to B": blob_to_data_uri(row["difference_a_to_b_png"]),
+                "Ausgewähltes Bild (als Bild)": blob_to_data_uri(selected_blob),
+                "Buchstabe des Ausgewählten Bildes": selected_letter,
+                "Timestamp": row["created_at"],
+            }
+        )
+    return result
+
+
 def collect_images(folder: Path, recursive: bool) -> dict[str, Path]:
     candidates = folder.rglob("*") if recursive else folder.glob("*")
     files: dict[str, Path] = {}
@@ -1028,6 +1069,29 @@ def render_interaction_mode() -> None:
             st.error(f"Speichern fehlgeschlagen: {err}")
 
 
+def render_overview_mode() -> None:
+    st.subheader("Übersicht")
+    rows = list_interaction_overview_rows()
+    if not rows:
+        st.info("Noch keine Einträge aus dem Interaktion Modus vorhanden.")
+        return
+
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        row_height=120,
+        column_config={
+            "Bild A": st.column_config.ImageColumn("Bild A"),
+            "Bild B": st.column_config.ImageColumn("Bild B"),
+            "Difference A to B": st.column_config.ImageColumn("Difference A to B"),
+            "Ausgewähltes Bild (als Bild)": st.column_config.ImageColumn("Ausgewähltes Bild (als Bild)"),
+            "ID": st.column_config.NumberColumn("ID", format="%d"),
+            "Buchstabe des Ausgewählten Bildes": st.column_config.TextColumn("Buchstabe des Ausgewählten Bildes"),
+            "Timestamp": st.column_config.TextColumn("Timestamp"),
+        },
+    )
+
+
 def render_admin_mode() -> None:
     st.subheader("Admin")
     st.caption("Benutzerverwaltung")
@@ -1097,7 +1161,7 @@ def main() -> None:
     auth_user = st.session_state["auth_user"]
     is_admin = bool(auth_user.get("is_admin"))
 
-    options = ["Single Vergleich", "Batch Modus", "Interaktion Modus"]
+    options = ["Single Vergleich", "Batch Modus", "Interaktion Modus", "Übersicht"]
     if is_admin:
         options.append("Admin")
     if admin_clicked and is_admin:
@@ -1114,6 +1178,8 @@ def main() -> None:
         render_batch_mode()
     elif mode == "Interaktion Modus":
         render_interaction_mode()
+    elif mode == "Übersicht":
+        render_overview_mode()
     elif mode == "Admin":
         render_admin_mode()
     else:

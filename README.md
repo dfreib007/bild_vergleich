@@ -4,7 +4,7 @@ Kleine POC-App zum Vergleich von zwei Bildern mit **OpenCV** und **SSIM** (sciki
 Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 
 ## Features
-- Modusauswahl: **Single Vergleich**, **Batch Modus** oder **Interaktion Modus**
+- Modusauswahl: **Single Vergleich**, **Batch Modus**, **Interaktion Modus** oder **Übersicht**
 - Upload von Referenzbild (Golden) und Testbild (PNG/JPG)
 - Optionales Alignment per ECC (`cv2.findTransformECC`) oder ORB + Homography
 - SSIM-Score (0..1)
@@ -15,6 +15,7 @@ Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 - Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
 - Interaktion-Modus mit beidseitigem Vergleich (A→B und B→A) und User-Entscheidung
 - Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in SQLite
+- Übersichtsmodus mit Grid aller Interaktionsergebnisse inkl. Bildspalten
 
 ## Voraussetzungen
 - Python **3.9+**
@@ -46,6 +47,15 @@ streamlit run app.py
   - Vergleich in beide Richtungen (`A → B` und `B → A`) inkl. Visualisierung der Unterschiede.
   - User wählt anschließend das korrekte Bild (`Bild A` oder `Bild B`) aus.
   - Ergebnis wird in einer SQLite-Datenbank gespeichert.
+- **Übersicht**:
+  - Zeigt alle Ergebnisse aus dem Interaktion-Modus in einem Grid:
+    - `ID`
+    - `Bild A`
+    - `Bild B`
+    - `Difference A to B`
+    - `Ausgewähltes Bild (als Bild)`
+    - `Buchstabe des Ausgewählten Bildes`
+    - `Timestamp`
 - **Admin** (nur für Admin-Benutzer sichtbar):
   - Benutzerliste
   - Benutzer hinzufügen (E-Mail + Passwort)
