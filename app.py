@@ -22,7 +22,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
-from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 DB_PATH = Path("interaktion_results.db")
@@ -1112,6 +1111,13 @@ def render_overview_mode() -> None:
         for r in rows
     ]
     df = pd.DataFrame(table_rows)
+
+    try:
+        from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+    except ImportError:
+        st.warning("st_aggrid ist nicht verfügbar. Fallback auf Standardtabelle ohne eingebettete Header-Filter.")
+        st.dataframe(df, use_container_width=True)
+        return
 
     img_renderer = JsCode(
         """
