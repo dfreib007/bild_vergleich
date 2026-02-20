@@ -1254,6 +1254,8 @@ def main() -> None:
         st.session_state["auth_user"] = None
     if "selected_mode" not in st.session_state:
         st.session_state["selected_mode"] = "Single Vergleich"
+    if "show_admin_panel" not in st.session_state:
+        st.session_state["show_admin_panel"] = False
 
     if st.session_state["auth_user"] is None:
         render_login()
@@ -1267,11 +1269,17 @@ def main() -> None:
     auth_user = st.session_state["auth_user"]
     is_admin = bool(auth_user.get("is_admin"))
 
-    options = ["Single Vergleich", "Batch Modus", "Interaktion Modus", "Übersicht"]
-    if is_admin:
-        options.append("Admin")
     if admin_clicked and is_admin:
-        st.session_state["selected_mode"] = "Admin"
+        st.session_state["show_admin_panel"] = True
+
+    if st.session_state["show_admin_panel"] and is_admin:
+        if st.button("Zurück", key="admin_back_button"):
+            st.session_state["show_admin_panel"] = False
+            st.rerun()
+        render_admin_mode()
+        return
+
+    options = ["Single Vergleich", "Batch Modus", "Interaktion Modus", "Übersicht"]
 
     current_mode = st.session_state.get("selected_mode", "Single Vergleich")
     if current_mode not in options:
@@ -1286,8 +1294,6 @@ def main() -> None:
         render_interaction_mode()
     elif mode == "Übersicht":
         render_overview_mode()
-    elif mode == "Admin":
-        render_admin_mode()
     else:
         render_single_mode()
 
