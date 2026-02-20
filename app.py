@@ -651,7 +651,7 @@ def get_build_label() -> str:
     return f"commit {commit_sha}"
 
 
-def render_header() -> bool:
+def render_header() -> tuple[bool, bool]:
     user = st.session_state.get("auth_user")
     is_admin = bool(user and user.get("is_admin"))
 
@@ -696,7 +696,7 @@ def render_header() -> bool:
     )
 
     logo_path = find_logo_path()
-    col_left, col_admin, col_user, col_logout = st.columns([7, 1.2, 2, 1], vertical_alignment="center")
+    col_left, col_menu, col_admin, col_user, col_logout = st.columns([6.3, 0.9, 1.2, 2, 1], vertical_alignment="center")
     with col_left:
         logo_col, title_col = st.columns([1.2, 5.8], vertical_alignment="center")
         with logo_col:
@@ -714,6 +714,8 @@ def render_header() -> bool:
                 """,
                 unsafe_allow_html=True,
             )
+    with col_menu:
+        menu_clicked = st.button("☰ Menü", type="tertiary", use_container_width=True)
     with col_admin:
         admin_clicked = st.button("Admin", disabled=not is_admin, use_container_width=True)
     with col_user:
@@ -725,7 +727,7 @@ def render_header() -> bool:
             st.session_state["selected_mode"] = "Single Vergleich"
             st.rerun()
 
-    return bool(admin_clicked)
+    return bool(admin_clicked), bool(menu_clicked)
 
 
 def render_login() -> None:
@@ -1266,6 +1268,8 @@ def main() -> None:
         st.session_state["selected_mode"] = "Single Vergleich"
     if "show_admin_panel" not in st.session_state:
         st.session_state["show_admin_panel"] = False
+    if "menu_open" not in st.session_state:
+        st.session_state["menu_open"] = True
 
     if st.session_state["auth_user"] is None:
         render_login()
@@ -1275,9 +1279,13 @@ def main() -> None:
         )
         return
 
-    admin_clicked = render_header()
+    admin_clicked, menu_clicked = render_header()
     auth_user = st.session_state["auth_user"]
     is_admin = bool(auth_user.get("is_admin"))
+
+    if menu_clicked:
+        st.session_state["menu_open"] = not st.session_state["menu_open"]
+        st.rerun()
 
     if admin_clicked and is_admin:
         st.session_state["show_admin_panel"] = True
@@ -1295,24 +1303,33 @@ def main() -> None:
     if current_mode not in options:
         current_mode = "Single Vergleich"
 
-    with st.sidebar:
-        st.markdown("### ☰ Menü")
-        mode = st.radio(
-            "Modus",
-            options=options,
-            index=options.index(current_mode),
-            key="mode_select",
-        )
+    if st.session_state["menu_open"]:
+        menu_col, content_col = st.columns([1.3, 5.7], gap="large")
+        with menu_col:
+            st.markdown("### Menü")
+            mode = st.radio(
+                "Modus",
+                options=options,
+                index=options.index(current_mode),
+                key="mode_select",
+                label_visibility="collapsed",
+            )
+        render_target = content_col
+    else:
+        mode = current_mode
+        render_target = st.container()
+
     st.session_state["selected_mode"] = mode
 
-    if mode == "Batch Modus":
-        render_batch_mode()
-    elif mode == "Interaktion Modus":
-        render_interaction_mode()
-    elif mode == "Übersicht":
-        render_overview_mode()
-    else:
-        render_single_mode()
+    with render_target:
+        if mode == "Batch Modus":
+            render_batch_mode()
+        elif mode == "Interaktion Modus":
+            render_interaction_mode()
+        elif mode == "Übersicht":
+            render_overview_mode()
+        else:
+            render_single_mode()
 
 
 if __name__ == "__main__":
