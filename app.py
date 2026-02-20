@@ -7,7 +7,7 @@ import io
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1070,6 +1070,86 @@ def render_overview_mode() -> None:
         st.info("Noch keine Einträge aus dem Interaktion Modus vorhanden.")
         return
 
+    st.markdown("**Filter**")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        id_filter = st.text_input("ID", key="ov_filter_id", placeholder="z. B. 12")
+        has_image_a = st.selectbox("Bild A", options=["Alle", "Hat Bild"], key="ov_filter_img_a")
+        has_image_b = st.selectbox("Bild B", options=["Alle", "Hat Bild"], key="ov_filter_img_b")
+    with f2:
+        has_diff = st.selectbox("Difference A to B", options=["Alle", "Hat Bild"], key="ov_filter_diff")
+        has_selected_image = st.selectbox(
+            "Ausgewähltes Bild (als Bild)", options=["Alle", "Hat Bild"], key="ov_filter_selected_img"
+        )
+        selected_letter_filter = st.selectbox(
+            "Buchstabe des ausgewählten Bildes",
+            options=["Alle", "A", "B", "?"],
+            key="ov_filter_selected_letter",
+        )
+    with f3:
+        timestamp_filter = st.text_input(
+            "Timestamp (enthält)", key="ov_filter_timestamp", placeholder="z. B. 2026-02-20"
+        )
+        use_ts_from = st.checkbox("Von-Filter aktiv", key="ov_use_ts_from")
+        ts_from = st.date_input("Timestamp von", value=date.today(), key="ov_filter_ts_from")
+        use_ts_to = st.checkbox("Bis-Filter aktiv", key="ov_use_ts_to")
+        ts_to = st.date_input("Timestamp bis", value=date.today(), key="ov_filter_ts_to")
+
+    sort_col, sort_dir_col = st.columns(2)
+    with sort_col:
+        sort_by = st.selectbox(
+            "Sortieren nach",
+            options=["ID", "Buchstabe des ausgewählten Bildes", "Timestamp"],
+            key="ov_sort_by",
+        )
+    with sort_dir_col:
+        sort_dir = st.selectbox("Richtung", options=["Absteigend", "Aufsteigend"], key="ov_sort_dir")
+
+    filtered_rows = rows
+
+    if id_filter.strip():
+        filtered_rows = [r for r in filtered_rows if id_filter.strip() in str(r["id"])]
+    if has_image_a == "Hat Bild":
+        filtered_rows = [r for r in filtered_rows if bool(r["image_a_png"])]
+    if has_image_b == "Hat Bild":
+        filtered_rows = [r for r in filtered_rows if bool(r["image_b_png"])]
+    if has_diff == "Hat Bild":
+        filtered_rows = [r for r in filtered_rows if bool(r["diff_a_to_b_png"])]
+    if has_selected_image == "Hat Bild":
+        filtered_rows = [r for r in filtered_rows if bool(r["selected_image_png"])]
+    if selected_letter_filter != "Alle":
+        filtered_rows = [r for r in filtered_rows if r["selected_letter"] == selected_letter_filter]
+    if timestamp_filter.strip():
+        filtered_rows = [r for r in filtered_rows if timestamp_filter.strip() in r["timestamp"]]
+
+    def parse_iso_date(value: str) -> date | None:
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
+
+    if use_ts_from:
+        filtered_rows = [
+            r for r in filtered_rows if (parsed := parse_iso_date(r["timestamp"])) is not None and parsed >= ts_from
+        ]
+    if use_ts_to:
+        filtered_rows = [
+            r for r in filtered_rows if (parsed := parse_iso_date(r["timestamp"])) is not None and parsed <= ts_to
+        ]
+
+    reverse_sort = sort_dir == "Absteigend"
+    if sort_by == "ID":
+        filtered_rows = sorted(filtered_rows, key=lambda r: r["id"], reverse=reverse_sort)
+    elif sort_by == "Buchstabe des ausgewählten Bildes":
+        filtered_rows = sorted(filtered_rows, key=lambda r: r["selected_letter"], reverse=reverse_sort)
+    else:
+        filtered_rows = sorted(filtered_rows, key=lambda r: r["timestamp"], reverse=reverse_sort)
+
+    st.caption(f"Treffer: {len(filtered_rows)} / {len(rows)}")
+    if not filtered_rows:
+        st.warning("Keine Zeilen entsprechen den aktuellen Filtern.")
+        return
+
     headers = [
         "ID",
         "Bild A",
@@ -1085,7 +1165,7 @@ def render_overview_mode() -> None:
     for col, title in zip(header_cols, headers):
         col.markdown(f"**{title}**")
 
-    for row in rows:
+    for row in filtered_rows:
         cols = st.columns(widths)
         cols[0].write(row["id"])
         cols[1].image(row["image_a_png"], use_container_width=True)
