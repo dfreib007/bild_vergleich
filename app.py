@@ -1307,7 +1307,8 @@ def main() -> None:
                 use_container_width=True,
             )
             if clicked:
-                mode = item
+                st.session_state["selected_mode"] = item
+                st.rerun()
     st.session_state["selected_mode"] = mode
 
     if mode == "Batch Modus":
