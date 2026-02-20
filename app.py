@@ -1269,10 +1269,6 @@ def main() -> None:
 
     if st.session_state["auth_user"] is None:
         render_login()
-        st.info(
-            f"Initialer Admin (nur beim ersten Start): {DEFAULT_ADMIN_EMAIL} / {DEFAULT_ADMIN_PASSWORD}. "
-            "Bitte nach dem ersten Login im Admin-Menü Passwort ändern."
-        )
         return
 
     admin_clicked = render_header()
