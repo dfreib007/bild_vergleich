@@ -1297,13 +1297,17 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("### ☰ Menü")
-        mode = st.selectbox(
-            "Modus",
-            options=options,
-            index=options.index(current_mode),
-            key="mode_select",
-            label_visibility="collapsed",
-        )
+        mode = current_mode
+        for item in options:
+            is_active = item == current_mode
+            clicked = st.button(
+                item,
+                key=f"menu_item_{item}",
+                type="primary" if is_active else "secondary",
+                use_container_width=True,
+            )
+            if clicked:
+                mode = item
     st.session_state["selected_mode"] = mode
 
     if mode == "Batch Modus":
