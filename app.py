@@ -94,17 +94,37 @@ def init_database() -> None:
 
         admin_row = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
         if admin_row is None:
-            conn.execute(
-                """
-                INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
-                VALUES (?, ?, 1, 1, ?)
-                """,
-                (
-                    DEFAULT_ADMIN_EMAIL,
-                    hash_password(DEFAULT_ADMIN_PASSWORD),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
+            if not DEFAULT_ADMIN_EMAIL or not DEFAULT_ADMIN_PASSWORD:
+                raise RuntimeError(
+                    "Bootstrap admin credentials are missing. "
+                    "Set APP_BOOTSTRAP_ADMIN_EMAIL and APP_BOOTSTRAP_ADMIN_PASSWORD."
+                )
+
+            existing_user = conn.execute(
+                "SELECT id FROM users WHERE email = ? LIMIT 1",
+                (DEFAULT_ADMIN_EMAIL,),
+            ).fetchone()
+            if existing_user is not None:
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET password_hash = ?, is_admin = 1, is_active = 1
+                    WHERE id = ?
+                    """,
+                    (hash_password(DEFAULT_ADMIN_PASSWORD), int(existing_user["id"])),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                    VALUES (?, ?, 1, 1, ?)
+                    """,
+                    (
+                        DEFAULT_ADMIN_EMAIL,
+                        hash_password(DEFAULT_ADMIN_PASSWORD),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
         conn.commit()
 
 
