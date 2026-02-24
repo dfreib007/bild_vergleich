@@ -16,6 +16,7 @@ import app
 @pytest.fixture
 def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "test_app.db"
+    monkeypatch.setattr(app, "DATABASE_URL", "")
     monkeypatch.setattr(app, "DB_PATH", db_path)
     monkeypatch.setattr(app, "DEFAULT_ADMIN_EMAIL", "admin@test.local")
     monkeypatch.setattr(app, "DEFAULT_ADMIN_PASSWORD", "Admin1234!")

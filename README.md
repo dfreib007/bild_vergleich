@@ -14,7 +14,7 @@ Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 - Download von Overlay/Mask/Diff als PNG, Kennzahlen als CSV und Vergleichsreport als PDF
 - Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
 - Interaktion-Modus mit beidseitigem Vergleich (A→B und B→A) und User-Entscheidung
-- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in SQLite
+- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in Supabase PostgreSQL (mit SQLite-Fallback)
 - Übersichtsmodus mit Grid aller Interaktionsergebnisse inkl. Bildspalten
 
 ## Voraussetzungen
@@ -46,7 +46,7 @@ streamlit run app.py
   - Upload von Bild A und Bild B.
   - Vergleich in beide Richtungen (`A → B` und `B → A`) inkl. Visualisierung der Unterschiede.
   - User wählt anschließend das korrekte Bild (`Bild A` oder `Bild B`) aus.
-  - Ergebnis wird in einer SQLite-Datenbank gespeichert.
+  - Ergebnis wird in der Datenbank gespeichert.
 - **Übersicht**:
   - Zeigt alle Ergebnisse aus dem Interaktion-Modus in einem Grid:
     - `ID`
@@ -93,7 +93,8 @@ streamlit run app.py
   - Enthält pro Bildpaar Pfade, Status, SSIM, Regionsanzahl, Abweichungsfläche und Alignment-Status.
 
 ## Datenbank (Interaktion Modus)
-- Datei: `interaktion_results.db` (im Projektverzeichnis)
+- Primär: Supabase PostgreSQL über `DATABASE_URL`
+- Fallback (wenn `DATABASE_URL` nicht gesetzt ist): `interaktion_results.db` im Projektverzeichnis
 - Tabellen: `interaction_results`, `users`
 - Gespeicherte Felder:
   - Zeitstempel (`created_at`)
@@ -112,6 +113,16 @@ streamlit run app.py
 - Für Deployment solltest du die Bootstrap-Werte per Umgebungsvariablen setzen:
   - `APP_BOOTSTRAP_ADMIN_EMAIL`
   - `APP_BOOTSTRAP_ADMIN_PASSWORD`
+
+## Supabase Konfiguration
+- `SUPABASE_URL`:
+  - Default: `https://oergudbtabjgyemnzlmr.supabase.co`
+- `SUPABASE_PUBLISHABLE_KEY`:
+  - Default: `sb_publishable_2-zuv70ZZir3vXJDL4qxyA_b-cKBBTV`
+- `DATABASE_URL`:
+  - Beispiel: `postgresql://postgres:<PASSWORT>@db.oergudbtabjgyemnzlmr.supabase.co:5432/postgres`
+  - Optionaler Query-Parameter `sslmode=require` wird automatisch ergänzt.
+  - Platzhalter wie `[YOUR-PASSWORD]` sind ungültig und führen zu einem Startfehler.
 
 ## Tests & CI/CD
 - Automatisierte Tests liegen unter `/tests` und laufen mit `pytest`.

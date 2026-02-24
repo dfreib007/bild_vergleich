@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import cv2
 import numpy as np
@@ -22,9 +23,22 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from skimage.metrics import structural_similarity
+try:
+    import psycopg
+    from psycopg import errors as pg_errors
+    from psycopg.rows import dict_row
+except Exception:  # pragma: no cover - optional when only sqlite is used
+    psycopg = None
+    pg_errors = None
+    dict_row = None
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 DB_PATH = Path("interaktion_results.db")
+SUPABASE_PROJECT_URL = os.getenv("SUPABASE_URL", "https://oergudbtabjgyemnzlmr.supabase.co").strip()
+SUPABASE_PUBLISHABLE_KEY = os.getenv(
+    "SUPABASE_PUBLISHABLE_KEY", "sb_publishable_2-zuv70ZZir3vXJDL4qxyA_b-cKBBTV"
+).strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DEFAULT_ADMIN_EMAIL = os.getenv("APP_BOOTSTRAP_ADMIN_EMAIL", "admin@bildvergleich.local").strip().lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("APP_BOOTSTRAP_ADMIN_PASSWORD", "Admin1234!")
 
@@ -57,7 +71,40 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def get_db_connection() -> sqlite3.Connection:
+def _use_postgres() -> bool:
+    return DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")
+
+
+def _db_target_label() -> str:
+    return "Supabase PostgreSQL" if _use_postgres() else str(DB_PATH.resolve())
+
+
+def _normalize_database_url(raw_url: str) -> str:
+    if "[YOUR-PASSWORD]" in raw_url:
+        raise RuntimeError("DATABASE_URL enthält noch [YOUR-PASSWORD]. Bitte echtes Passwort setzen.")
+    parsed = urlparse(raw_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.setdefault("sslmode", "require")
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _db_query(sql: str) -> str:
+    return sql.replace("?", "%s") if _use_postgres() else sql
+
+
+def _is_unique_violation(exc: Exception) -> bool:
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    if pg_errors is not None and isinstance(exc, pg_errors.UniqueViolation):
+        return True
+    return getattr(exc, "sqlstate", None) == "23505"
+
+
+def get_db_connection() -> Any:
+    if _use_postgres():
+        if psycopg is None or dict_row is None:
+            raise RuntimeError("psycopg ist nicht installiert, aber DATABASE_URL ist gesetzt.")
+        return psycopg.connect(_normalize_database_url(DATABASE_URL), row_factory=dict_row)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -65,34 +112,63 @@ def get_db_connection() -> sqlite3.Connection:
 
 def init_database() -> None:
     with get_db_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS interaction_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                reference_a_png BLOB NOT NULL,
-                comparison_b_png BLOB NOT NULL,
-                difference_a_to_b_png BLOB NOT NULL,
-                difference_b_to_a_png BLOB NOT NULL,
-                selected_image TEXT NOT NULL,
-                selected_by TEXT NOT NULL
+        if _use_postgres():
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS interaction_results (
+                    id BIGSERIAL PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    reference_a_png BYTEA NOT NULL,
+                    comparison_b_png BYTEA NOT NULL,
+                    difference_a_to_b_png BYTEA NOT NULL,
+                    difference_b_to_a_png BYTEA NOT NULL,
+                    selected_image TEXT NOT NULL,
+                    selected_by TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                is_admin INTEGER NOT NULL DEFAULT 0,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id BIGSERIAL PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
+            admin_row = conn.execute(_db_query("SELECT id FROM users WHERE is_admin = ? LIMIT 1"), (True,)).fetchone()
+        else:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS interaction_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    reference_a_png BLOB NOT NULL,
+                    comparison_b_png BLOB NOT NULL,
+                    difference_a_to_b_png BLOB NOT NULL,
+                    difference_b_to_a_png BLOB NOT NULL,
+                    selected_image TEXT NOT NULL,
+                    selected_by TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            admin_row = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
 
-        admin_row = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
         if admin_row is None:
             if not DEFAULT_ADMIN_EMAIL or not DEFAULT_ADMIN_PASSWORD:
                 raise RuntimeError(
@@ -101,43 +177,55 @@ def init_database() -> None:
                 )
 
             existing_user = conn.execute(
-                "SELECT id FROM users WHERE email = ? LIMIT 1",
+                _db_query("SELECT id FROM users WHERE email = ? LIMIT 1"),
                 (DEFAULT_ADMIN_EMAIL,),
             ).fetchone()
             if existing_user is not None:
                 conn.execute(
-                    """
-                    UPDATE users
-                    SET password_hash = ?, is_admin = 1, is_active = 1
-                    WHERE id = ?
-                    """,
-                    (hash_password(DEFAULT_ADMIN_PASSWORD), int(existing_user["id"])),
+                    _db_query(
+                        """
+                        UPDATE users
+                        SET password_hash = ?, is_admin = ?, is_active = ?
+                        WHERE id = ?
+                        """
+                    ),
+                    (
+                        hash_password(DEFAULT_ADMIN_PASSWORD),
+                        True if _use_postgres() else 1,
+                        True if _use_postgres() else 1,
+                        int(existing_user["id"]),
+                    ),
                 )
             else:
                 conn.execute(
-                    """
-                    INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
-                    VALUES (?, ?, 1, 1, ?)
-                    """,
+                    _db_query(
+                        """
+                        INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """
+                    ),
                     (
                         DEFAULT_ADMIN_EMAIL,
                         hash_password(DEFAULT_ADMIN_PASSWORD),
+                        True if _use_postgres() else 1,
+                        True if _use_postgres() else 1,
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
-        conn.commit()
 
 
 def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
     normalized_email = email.strip().lower()
     with get_db_connection() as conn:
         row = conn.execute(
-            """
-            SELECT id, email, password_hash, is_admin, is_active
-            FROM users
-            WHERE email = ?
-            LIMIT 1
-            """,
+            _db_query(
+                """
+                SELECT id, email, password_hash, is_admin, is_active
+                FROM users
+                WHERE email = ?
+                LIMIT 1
+                """
+            ),
             (normalized_email,),
         ).fetchone()
 
@@ -156,11 +244,13 @@ def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
 def list_users() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
-            """
-            SELECT id, email, is_admin, is_active, created_at
-            FROM users
-            ORDER BY id ASC
-            """
+            _db_query(
+                """
+                SELECT id, email, is_admin, is_active, created_at
+                FROM users
+                ORDER BY id ASC
+                """
+            )
         ).fetchall()
 
     return [
@@ -185,15 +275,24 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
     try:
         with get_db_connection() as conn:
             conn.execute(
-                """
-                INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
-                VALUES (?, ?, 0, 1, ?)
-                """,
-                (normalized_email, hash_password(password), datetime.now(timezone.utc).isoformat()),
+                _db_query(
+                    """
+                    INSERT INTO users (email, password_hash, is_admin, is_active, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """
+                ),
+                (
+                    normalized_email,
+                    hash_password(password),
+                    False if _use_postgres() else 0,
+                    True if _use_postgres() else 1,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
-            conn.commit()
-    except sqlite3.IntegrityError:
-        return False, "Benutzer existiert bereits."
+    except Exception as err:
+        if _is_unique_violation(err):
+            return False, "Benutzer existiert bereits."
+        raise
 
     return True, "Benutzer wurde angelegt."
 
@@ -204,15 +303,14 @@ def update_user_password(email: str, new_password: str) -> tuple[bool, str]:
         return False, "Passwort muss mindestens 8 Zeichen haben."
 
     with get_db_connection() as conn:
-        row = conn.execute("SELECT id FROM users WHERE email = ? LIMIT 1", (normalized_email,)).fetchone()
+        row = conn.execute(_db_query("SELECT id FROM users WHERE email = ? LIMIT 1"), (normalized_email,)).fetchone()
         if row is None:
             return False, "Benutzer nicht gefunden."
 
         conn.execute(
-            "UPDATE users SET password_hash = ? WHERE email = ?",
+            _db_query("UPDATE users SET password_hash = ? WHERE email = ?"),
             (hash_password(new_password), normalized_email),
         )
-        conn.commit()
 
     return True, "Passwort aktualisiert."
 
@@ -221,7 +319,7 @@ def set_user_active(email: str, active: bool) -> tuple[bool, str]:
     normalized_email = email.strip().lower()
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT id, is_admin FROM users WHERE email = ? LIMIT 1", (normalized_email,)
+            _db_query("SELECT id, is_admin FROM users WHERE email = ? LIMIT 1"), (normalized_email,)
         ).fetchone()
         if row is None:
             return False, "Benutzer nicht gefunden."
@@ -229,8 +327,10 @@ def set_user_active(email: str, active: bool) -> tuple[bool, str]:
         if int(row["is_admin"]) == 1 and not active:
             return False, "Admin kann nicht deaktiviert werden."
 
-        conn.execute("UPDATE users SET is_active = ? WHERE email = ?", (1 if active else 0, normalized_email))
-        conn.commit()
+        conn.execute(
+            _db_query("UPDATE users SET is_active = ? WHERE email = ?"),
+            ((active if _use_postgres() else (1 if active else 0)), normalized_email),
+        )
 
     return True, "Benutzerstatus aktualisiert."
 
@@ -561,45 +661,48 @@ def save_interaction_result(
 
     with get_db_connection() as conn:
         conn.execute(
-            """
-            INSERT INTO interaction_results (
-                created_at,
-                reference_a_png,
-                comparison_b_png,
-                difference_a_to_b_png,
-                difference_b_to_a_png,
-                selected_image,
-                selected_by
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
+            _db_query(
+                """
+                INSERT INTO interaction_results (
+                    created_at,
+                    reference_a_png,
+                    comparison_b_png,
+                    difference_a_to_b_png,
+                    difference_b_to_a_png,
+                    selected_image,
+                    selected_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """
+            ),
             (
                 created_at,
-                sqlite3.Binary(encode_png_bytes(image_a)),
-                sqlite3.Binary(encode_png_bytes(image_b)),
-                sqlite3.Binary(encode_png_bytes(diff_a_to_b)),
-                sqlite3.Binary(encode_png_bytes(diff_b_to_a)),
+                encode_png_bytes(image_a),
+                encode_png_bytes(image_b),
+                encode_png_bytes(diff_a_to_b),
+                encode_png_bytes(diff_b_to_a),
                 selected_image,
                 selected_by,
             ),
         )
-        conn.commit()
 
 
 def list_interaction_overview_rows() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
-            """
-            SELECT
-                id,
-                created_at,
-                reference_a_png,
-                comparison_b_png,
-                difference_a_to_b_png,
-                selected_image
-            FROM interaction_results
-            ORDER BY id DESC
-            """
+            _db_query(
+                """
+                SELECT
+                    id,
+                    created_at,
+                    reference_a_png,
+                    comparison_b_png,
+                    difference_a_to_b_png,
+                    selected_image
+                FROM interaction_results
+                ORDER BY id DESC
+                """
+            )
         ).fetchall()
 
     result: list[dict[str, Any]] = []
@@ -1156,7 +1259,7 @@ def render_interaction_mode() -> None:
                 selected_image=selected_image,
                 selected_by=selected_by,
             )
-            st.success(f"Gespeichert in {DB_PATH.resolve()}")
+            st.success(f"Gespeichert in {_db_target_label()}")
         except ValueError as err:
             st.error(f"Speichern fehlgeschlagen: {err}")
 
