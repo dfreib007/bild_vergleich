@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import sys
 
 import numpy as np
@@ -13,13 +14,42 @@ if str(ROOT_DIR) not in sys.path:
 import app
 
 
+class FakePgConn:
+    def __init__(self, db_path: Path) -> None:
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+
+    def __enter__(self) -> "FakePgConn":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is None:
+            self._conn.commit()
+        self._conn.close()
+
+    def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
+        normalized_sql = (
+            sql.replace("%s", "?")
+            .replace("BIGSERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
+            .replace("BYTEA", "BLOB")
+            .replace("BOOLEAN", "INTEGER")
+        )
+        return self._conn.execute(normalized_sql, params)
+
+
 @pytest.fixture
 def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "test_app.db"
-    monkeypatch.setattr(app, "DATABASE_URL", "")
-    monkeypatch.setattr(app, "DB_PATH", db_path)
+    monkeypatch.setattr(app, "DATABASE_URL", "postgresql://postgres:pw@localhost:5432/postgres")
+    monkeypatch.setattr(app, "get_db_connection", lambda: FakePgConn(db_path))
     monkeypatch.setattr(app, "DEFAULT_ADMIN_EMAIL", "admin@test.local")
     monkeypatch.setattr(app, "DEFAULT_ADMIN_PASSWORD", "Admin1234!")
+    orig_is_unique = app._is_unique_violation
+    monkeypatch.setattr(
+        app,
+        "_is_unique_violation",
+        lambda exc: isinstance(exc, sqlite3.IntegrityError) or orig_is_unique(exc),
+    )
     app.init_database()
     return db_path
 

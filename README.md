@@ -14,7 +14,7 @@ Für Cloud-Deployment wird `opencv-python-headless` verwendet.
 - Download von Overlay/Mask/Diff als PNG, Kennzahlen als CSV und Vergleichsreport als PDF
 - Batch-Vergleich von zwei Ordnern mit sequenzieller Auswertung und CSV-Export
 - Interaktion-Modus mit beidseitigem Vergleich (A→B und B→A) und User-Entscheidung
-- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in Supabase PostgreSQL (mit SQLite-Fallback)
+- Login/Authentifizierung mit Benutzerverwaltung (Admin + User) in Supabase PostgreSQL
 - Übersichtsmodus mit Grid aller Interaktionsergebnisse inkl. Bildspalten
 
 ## Voraussetzungen
@@ -93,8 +93,7 @@ streamlit run app.py
   - Enthält pro Bildpaar Pfade, Status, SSIM, Regionsanzahl, Abweichungsfläche und Alignment-Status.
 
 ## Datenbank (Interaktion Modus)
-- Primär: Supabase PostgreSQL über `DATABASE_URL`
-- Fallback (wenn `DATABASE_URL` nicht gesetzt ist): `interaktion_results.db` im Projektverzeichnis
+- Supabase PostgreSQL über `DATABASE_URL` (Pflicht in diesem Branch)
 - Tabellen: `interaction_results`, `users`
 - Gespeicherte Felder:
   - Zeitstempel (`created_at`)
@@ -120,7 +119,7 @@ streamlit run app.py
 - `SUPABASE_PUBLISHABLE_KEY`:
   - Default: `sb_publishable_2-zuv70ZZir3vXJDL4qxyA_b-cKBBTV`
 - `DATABASE_URL`:
-  - Beispiel: `postgresql://postgres:<PASSWORT>@db.oergudbtabjgyemnzlmr.supabase.co:5432/postgres`
+  - Verwende die **Supabase Pooler-URL** (Connection Pooling), nicht den direkten `db.oergudbtabjgyemnzlmr.supabase.co:5432` Host
   - Optionaler Query-Parameter `sslmode=require` wird automatisch ergänzt.
   - Platzhalter wie `[YOUR-PASSWORD]` sind ungültig und führen zu einem Startfehler.
 

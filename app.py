@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import io
 import os
-import sqlite3
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -28,23 +27,19 @@ try:
     import psycopg
     from psycopg import errors as pg_errors
     from psycopg.rows import dict_row
-except Exception:  # pragma: no cover - optional when only sqlite is used
+except Exception:  # pragma: no cover - optional import failure in test/runtime environments
     psycopg = None
     pg_errors = None
     dict_row = None
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
-DB_PATH = Path("interaktion_results.db")
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_URL", "https://oergudbtabjgyemnzlmr.supabase.co").strip()
 SUPABASE_PUBLISHABLE_KEY = os.getenv(
     "SUPABASE_PUBLISHABLE_KEY", "sb_publishable_2-zuv70ZZir3vXJDL4qxyA_b-cKBBTV"
 ).strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-ALLOW_SQLITE_FALLBACK = os.getenv("ALLOW_SQLITE_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_ADMIN_EMAIL = os.getenv("APP_BOOTSTRAP_ADMIN_EMAIL", "admin@bildvergleich.local").strip().lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("APP_BOOTSTRAP_ADMIN_PASSWORD", "Admin1234!")
-ACTIVE_DB_BACKEND = "postgres" if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://") else "sqlite"
-DB_FALLBACK_REASON: str | None = None
 
 
 @dataclass
@@ -79,14 +74,8 @@ def _use_postgres() -> bool:
     return DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")
 
 
-def _using_postgres_backend() -> bool:
-    return ACTIVE_DB_BACKEND == "postgres"
-
-
 def _db_target_label() -> str:
-    if ACTIVE_DB_BACKEND == "postgres":
-        return "Supabase PostgreSQL"
-    return str(DB_PATH.resolve())
+    return "Supabase PostgreSQL"
 
 
 def _normalize_database_url(raw_url: str) -> str:
@@ -115,106 +104,71 @@ def _with_ipv4_hostaddr(raw_url: str) -> str:
 
 
 def _db_query(sql: str) -> str:
-    return sql.replace("?", "%s") if _using_postgres_backend() else sql
+    return sql.replace("?", "%s")
 
 
 def _is_unique_violation(exc: Exception) -> bool:
-    if isinstance(exc, sqlite3.IntegrityError):
-        return True
     if pg_errors is not None and isinstance(exc, pg_errors.UniqueViolation):
         return True
     return getattr(exc, "sqlstate", None) == "23505"
 
 
-def _activate_sqlite_fallback(reason: str) -> None:
-    global ACTIVE_DB_BACKEND, DB_FALLBACK_REASON
-    ACTIVE_DB_BACKEND = "sqlite"
-    DB_FALLBACK_REASON = reason
+def _validate_supabase_config() -> None:
+    if not _use_postgres():
+        raise RuntimeError("DATABASE_URL fehlt oder ist ungültig (muss mit postgresql:// beginnen).")
+    if "[YOUR-PASSWORD]" in DATABASE_URL:
+        raise RuntimeError("DATABASE_URL enthält noch [YOUR-PASSWORD]. Bitte echtes Passwort setzen.")
 
 
 def get_db_connection() -> Any:
-    if _using_postgres_backend():
-        if psycopg is None or dict_row is None:
-            raise RuntimeError("psycopg ist nicht installiert, aber DATABASE_URL ist gesetzt.")
-        normalized_url = _normalize_database_url(DATABASE_URL)
+    _validate_supabase_config()
+    if psycopg is None or dict_row is None:
+        raise RuntimeError("psycopg ist nicht installiert.")
+    normalized_url = _normalize_database_url(DATABASE_URL)
+    try:
+        return psycopg.connect(normalized_url, row_factory=dict_row)
+    except Exception as exc:
+        if "Cannot assign requested address" not in str(exc):
+            raise
+        # Some environments only have IPv4 routing available.
         try:
-            return psycopg.connect(normalized_url, row_factory=dict_row)
-        except Exception as exc:
-            if "Cannot assign requested address" not in str(exc):
-                if not ALLOW_SQLITE_FALLBACK:
-                    raise
-                _activate_sqlite_fallback(str(exc))
-            else:
-                # Some environments only have IPv4 routing available.
-                try:
-                    return psycopg.connect(_with_ipv4_hostaddr(normalized_url), row_factory=dict_row)
-                except Exception as exc_ipv4:
-                    if not ALLOW_SQLITE_FALLBACK:
-                        raise
-                    _activate_sqlite_fallback(str(exc_ipv4))
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+            return psycopg.connect(_with_ipv4_hostaddr(normalized_url), row_factory=dict_row)
+        except Exception:
+            raise RuntimeError(
+                "Supabase ist nicht erreichbar. Verwende in DATABASE_URL die Supabase Pooler-URL "
+                "(Connection pooling), nicht den direkten db.<project>.supabase.co:5432 Host."
+            ) from exc
 
 
 def init_database() -> None:
     with get_db_connection() as conn:
-        if _using_postgres_backend():
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS interaction_results (
-                    id BIGSERIAL PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    reference_a_png BYTEA NOT NULL,
-                    comparison_b_png BYTEA NOT NULL,
-                    difference_a_to_b_png BYTEA NOT NULL,
-                    difference_b_to_a_png BYTEA NOT NULL,
-                    selected_image TEXT NOT NULL,
-                    selected_by TEXT NOT NULL
-                )
-                """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interaction_results (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                reference_a_png BYTEA NOT NULL,
+                comparison_b_png BYTEA NOT NULL,
+                difference_a_to_b_png BYTEA NOT NULL,
+                difference_b_to_a_png BYTEA NOT NULL,
+                selected_image TEXT NOT NULL,
+                selected_by TEXT NOT NULL
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id BIGSERIAL PRIMARY KEY,
-                    email TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    created_at TEXT NOT NULL
-                )
-                """
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TEXT NOT NULL
             )
-            admin_row = conn.execute(_db_query("SELECT id FROM users WHERE is_admin = ? LIMIT 1"), (True,)).fetchone()
-        else:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS interaction_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    reference_a_png BLOB NOT NULL,
-                    comparison_b_png BLOB NOT NULL,
-                    difference_a_to_b_png BLOB NOT NULL,
-                    difference_b_to_a_png BLOB NOT NULL,
-                    selected_image TEXT NOT NULL,
-                    selected_by TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    email TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-            admin_row = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
+            """
+        )
+        admin_row = conn.execute(_db_query("SELECT id FROM users WHERE is_admin = ? LIMIT 1"), (True,)).fetchone()
 
         if admin_row is None:
             if not DEFAULT_ADMIN_EMAIL or not DEFAULT_ADMIN_PASSWORD:
@@ -238,8 +192,8 @@ def init_database() -> None:
                     ),
                     (
                         hash_password(DEFAULT_ADMIN_PASSWORD),
-                        True if _using_postgres_backend() else 1,
-                        True if _using_postgres_backend() else 1,
+                        True,
+                        True,
                         int(existing_user["id"]),
                     ),
                 )
@@ -254,8 +208,8 @@ def init_database() -> None:
                     (
                         DEFAULT_ADMIN_EMAIL,
                         hash_password(DEFAULT_ADMIN_PASSWORD),
-                        True if _using_postgres_backend() else 1,
-                        True if _using_postgres_backend() else 1,
+                        True,
+                        True,
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
@@ -331,8 +285,8 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
                 (
                     normalized_email,
                     hash_password(password),
-                    False if _using_postgres_backend() else 0,
-                    True if _using_postgres_backend() else 1,
+                    False,
+                    True,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -376,7 +330,7 @@ def set_user_active(email: str, active: bool) -> tuple[bool, str]:
 
         conn.execute(
             _db_query("UPDATE users SET is_active = ? WHERE email = ?"),
-            ((active if _using_postgres_backend() else (1 if active else 0)), normalized_email),
+            (active, normalized_email),
         )
 
     return True, "Benutzerstatus aktualisiert."
@@ -1437,12 +1391,6 @@ def main() -> None:
         )
         st.exception(exc)
         st.stop()
-    if DB_FALLBACK_REASON:
-        st.warning(
-            "PostgreSQL war nicht erreichbar, die App nutzt SQLite-Fallback. "
-            f"Grund: {DB_FALLBACK_REASON}"
-        )
-
     if "auth_user" not in st.session_state:
         st.session_state["auth_user"] = None
     if "selected_mode" not in st.session_state:
