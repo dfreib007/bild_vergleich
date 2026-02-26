@@ -7,6 +7,7 @@ import hmac
 import io
 import os
 import sqlite3
+import socket
 import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -88,6 +89,22 @@ def _normalize_database_url(raw_url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
+def _with_ipv4_hostaddr(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    if not parsed.hostname:
+        return raw_url
+    try:
+        ipv4_info = socket.getaddrinfo(parsed.hostname, parsed.port or 5432, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return raw_url
+    if not ipv4_info:
+        return raw_url
+    ipv4_addr = ipv4_info[0][4][0]
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["hostaddr"] = ipv4_addr
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
 def _db_query(sql: str) -> str:
     return sql.replace("?", "%s") if _use_postgres() else sql
 
@@ -104,7 +121,14 @@ def get_db_connection() -> Any:
     if _use_postgres():
         if psycopg is None or dict_row is None:
             raise RuntimeError("psycopg ist nicht installiert, aber DATABASE_URL ist gesetzt.")
-        return psycopg.connect(_normalize_database_url(DATABASE_URL), row_factory=dict_row)
+        normalized_url = _normalize_database_url(DATABASE_URL)
+        try:
+            return psycopg.connect(normalized_url, row_factory=dict_row)
+        except Exception as exc:
+            if "Cannot assign requested address" not in str(exc):
+                raise
+            # Some environments only have IPv4 routing available.
+            return psycopg.connect(_with_ipv4_hostaddr(normalized_url), row_factory=dict_row)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -1381,7 +1405,15 @@ def render_admin_mode() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Bildvergleich", layout="wide")
-    init_database()
+    try:
+        init_database()
+    except Exception as exc:
+        st.error(
+            "Datenbankverbindung fehlgeschlagen. Bitte `DATABASE_URL` prüfen "
+            "(bei Supabase ggf. Pooler-URL oder IPv4-fähigen Host verwenden)."
+        )
+        st.exception(exc)
+        st.stop()
 
     if "auth_user" not in st.session_state:
         st.session_state["auth_user"] = None
