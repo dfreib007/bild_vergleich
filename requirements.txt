@@ -1,7 +1,7 @@
 streamlit==1.42.0
 opencv-python-headless==4.11.0.86
-numpy==1.26.4
-scikit-image==0.24.0
+numpy==2.2.3
+scikit-image==0.25.2
 reportlab==4.2.5
 streamlit-aggrid==1.0.5
-psycopg[binary]==3.2.3
+psycopg[binary]==3.2.6
