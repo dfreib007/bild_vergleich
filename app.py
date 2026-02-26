@@ -40,8 +40,11 @@ SUPABASE_PUBLISHABLE_KEY = os.getenv(
     "SUPABASE_PUBLISHABLE_KEY", "sb_publishable_2-zuv70ZZir3vXJDL4qxyA_b-cKBBTV"
 ).strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+ALLOW_SQLITE_FALLBACK = os.getenv("ALLOW_SQLITE_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_ADMIN_EMAIL = os.getenv("APP_BOOTSTRAP_ADMIN_EMAIL", "admin@bildvergleich.local").strip().lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("APP_BOOTSTRAP_ADMIN_PASSWORD", "Admin1234!")
+ACTIVE_DB_BACKEND = "postgres" if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://") else "sqlite"
+DB_FALLBACK_REASON: str | None = None
 
 
 @dataclass
@@ -76,8 +79,14 @@ def _use_postgres() -> bool:
     return DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")
 
 
+def _using_postgres_backend() -> bool:
+    return ACTIVE_DB_BACKEND == "postgres"
+
+
 def _db_target_label() -> str:
-    return "Supabase PostgreSQL" if _use_postgres() else str(DB_PATH.resolve())
+    if ACTIVE_DB_BACKEND == "postgres":
+        return "Supabase PostgreSQL"
+    return str(DB_PATH.resolve())
 
 
 def _normalize_database_url(raw_url: str) -> str:
@@ -106,7 +115,7 @@ def _with_ipv4_hostaddr(raw_url: str) -> str:
 
 
 def _db_query(sql: str) -> str:
-    return sql.replace("?", "%s") if _use_postgres() else sql
+    return sql.replace("?", "%s") if _using_postgres_backend() else sql
 
 
 def _is_unique_violation(exc: Exception) -> bool:
@@ -117,8 +126,14 @@ def _is_unique_violation(exc: Exception) -> bool:
     return getattr(exc, "sqlstate", None) == "23505"
 
 
+def _activate_sqlite_fallback(reason: str) -> None:
+    global ACTIVE_DB_BACKEND, DB_FALLBACK_REASON
+    ACTIVE_DB_BACKEND = "sqlite"
+    DB_FALLBACK_REASON = reason
+
+
 def get_db_connection() -> Any:
-    if _use_postgres():
+    if _using_postgres_backend():
         if psycopg is None or dict_row is None:
             raise RuntimeError("psycopg ist nicht installiert, aber DATABASE_URL ist gesetzt.")
         normalized_url = _normalize_database_url(DATABASE_URL)
@@ -126,9 +141,17 @@ def get_db_connection() -> Any:
             return psycopg.connect(normalized_url, row_factory=dict_row)
         except Exception as exc:
             if "Cannot assign requested address" not in str(exc):
-                raise
-            # Some environments only have IPv4 routing available.
-            return psycopg.connect(_with_ipv4_hostaddr(normalized_url), row_factory=dict_row)
+                if not ALLOW_SQLITE_FALLBACK:
+                    raise
+                _activate_sqlite_fallback(str(exc))
+            else:
+                # Some environments only have IPv4 routing available.
+                try:
+                    return psycopg.connect(_with_ipv4_hostaddr(normalized_url), row_factory=dict_row)
+                except Exception as exc_ipv4:
+                    if not ALLOW_SQLITE_FALLBACK:
+                        raise
+                    _activate_sqlite_fallback(str(exc_ipv4))
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -136,7 +159,7 @@ def get_db_connection() -> Any:
 
 def init_database() -> None:
     with get_db_connection() as conn:
-        if _use_postgres():
+        if _using_postgres_backend():
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS interaction_results (
@@ -215,8 +238,8 @@ def init_database() -> None:
                     ),
                     (
                         hash_password(DEFAULT_ADMIN_PASSWORD),
-                        True if _use_postgres() else 1,
-                        True if _use_postgres() else 1,
+                        True if _using_postgres_backend() else 1,
+                        True if _using_postgres_backend() else 1,
                         int(existing_user["id"]),
                     ),
                 )
@@ -231,8 +254,8 @@ def init_database() -> None:
                     (
                         DEFAULT_ADMIN_EMAIL,
                         hash_password(DEFAULT_ADMIN_PASSWORD),
-                        True if _use_postgres() else 1,
-                        True if _use_postgres() else 1,
+                        True if _using_postgres_backend() else 1,
+                        True if _using_postgres_backend() else 1,
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
@@ -308,8 +331,8 @@ def create_user(email: str, password: str) -> tuple[bool, str]:
                 (
                     normalized_email,
                     hash_password(password),
-                    False if _use_postgres() else 0,
-                    True if _use_postgres() else 1,
+                    False if _using_postgres_backend() else 0,
+                    True if _using_postgres_backend() else 1,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -353,7 +376,7 @@ def set_user_active(email: str, active: bool) -> tuple[bool, str]:
 
         conn.execute(
             _db_query("UPDATE users SET is_active = ? WHERE email = ?"),
-            ((active if _use_postgres() else (1 if active else 0)), normalized_email),
+            ((active if _using_postgres_backend() else (1 if active else 0)), normalized_email),
         )
 
     return True, "Benutzerstatus aktualisiert."
@@ -1414,6 +1437,11 @@ def main() -> None:
         )
         st.exception(exc)
         st.stop()
+    if DB_FALLBACK_REASON:
+        st.warning(
+            "PostgreSQL war nicht erreichbar, die App nutzt SQLite-Fallback. "
+            f"Grund: {DB_FALLBACK_REASON}"
+        )
 
     if "auth_user" not in st.session_state:
         st.session_state["auth_user"] = None
